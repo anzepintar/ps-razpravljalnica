@@ -38,9 +38,15 @@ func (s *RunNodeCmd) Run() error {
 	return nil
 }
 
+type StartCmd struct{}
+
+func (StartCmd) Run() error {
+	return (&RunNodeCmd{}).Run()
+}
+
 var cli struct {
-	RunNode RunNodeCmd `cmd:"" help:"Starts a node in the chain"`
-	Start   struct{}   `cmd:"" default:"1"`
+	RunNode RunNodeCmd `cmd:"run-node" help:"Starts a node in the chain"`
+	Start   StartCmd   `cmd:"" default:"1"`
 }
 
 type MessageBoardServer struct {

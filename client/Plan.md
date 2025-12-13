@@ -2,6 +2,15 @@
 
 Knjižnica Kong za cli
 
+Knjižnica Tview za tui
+
+ko poženeš client se odpre tui, če želiš poganjati ukaze prek cli poženeš `client cli`
+
+nek stream med strežnikom in clientom, da ne rabi biti client tudi strežnik
+
+- podatkovni tokovi grpc - metoda subscribe
+
+
 Navodila:
 
 Ustvarite distribuirano spletno storitev Razpravljalnica, ki bo namenjena izmenjavi mnenj med uporabniki o različnih temah.

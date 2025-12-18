@@ -47,6 +47,19 @@ message NodeInfo {
   string address = 2;
 }
 
+
+message WholeState {
+  int64 message_id = 1;
+  repeated TopicState topic = 2;
+  repeated string users     = 3;
+}
+
+message TopicState {
+  string name = 1;
+  map<int64, MessageState> messages = 2;
+  map<string,NodeInfo> subscribers = 3;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Data plane
 ////////////////////////////////////////////////////////////////////////////////
@@ -86,6 +99,12 @@ service  MessageBoard{
   // Subscribe to topics; goes to the node returned by head
   rpc SubscribeTopic(SubscribeTopicRequest) returns (stream MessageEvent);
 
+  // Get username from userid // TODO discuss, if this should return more user info.
+  rpc GetUser(GetUserRequest) returns (User);
+
+  // Not tail node
+
+  rpc GetWholeState() returns (WholeState)
 }
 
 message CreateUserRequest {
@@ -156,6 +175,10 @@ message MessageEvent {
   OpType op = 2; // type of event
   Message message = 3;
   google.protobuf.Timestamp event_at = 4; // timestamp of the event
+}
+
+message GetUserRequest {
+  int64 user_id = 1;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

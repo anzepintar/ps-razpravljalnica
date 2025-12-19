@@ -30,6 +30,8 @@ const (
 	MessageBoard_ListTopics_FullMethodName          = "/razpravljalnica.MessageBoard/ListTopics"
 	MessageBoard_GetMessages_FullMethodName         = "/razpravljalnica.MessageBoard/GetMessages"
 	MessageBoard_SubscribeTopic_FullMethodName      = "/razpravljalnica.MessageBoard/SubscribeTopic"
+	MessageBoard_GetUser_FullMethodName             = "/razpravljalnica.MessageBoard/GetUser"
+	MessageBoard_GetWholeState_FullMethodName       = "/razpravljalnica.MessageBoard/GetWholeState"
 )
 
 // MessageBoardClient is the client API for MessageBoard service.
@@ -56,6 +58,9 @@ type MessageBoardClient interface {
 	GetMessages(ctx context.Context, in *GetMessagesRequest, opts ...grpc.CallOption) (*GetMessagesResponse, error)
 	// Subscribe to topics; goes to the node returned by head
 	SubscribeTopic(ctx context.Context, in *SubscribeTopicRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[MessageEvent], error)
+	// Get username from userid // TODO discuss, if this should return more user info.
+	GetUser(ctx context.Context, in *GetUserRequest, opts ...grpc.CallOption) (*User, error)
+	GetWholeState(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*WholeState, error)
 }
 
 type messageBoardClient struct {
@@ -175,6 +180,26 @@ func (c *messageBoardClient) SubscribeTopic(ctx context.Context, in *SubscribeTo
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type MessageBoard_SubscribeTopicClient = grpc.ServerStreamingClient[MessageEvent]
 
+func (c *messageBoardClient) GetUser(ctx context.Context, in *GetUserRequest, opts ...grpc.CallOption) (*User, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(User)
+	err := c.cc.Invoke(ctx, MessageBoard_GetUser_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *messageBoardClient) GetWholeState(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*WholeState, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WholeState)
+	err := c.cc.Invoke(ctx, MessageBoard_GetWholeState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MessageBoardServer is the server API for MessageBoard service.
 // All implementations must embed UnimplementedMessageBoardServer
 // for forward compatibility.
@@ -199,6 +224,9 @@ type MessageBoardServer interface {
 	GetMessages(context.Context, *GetMessagesRequest) (*GetMessagesResponse, error)
 	// Subscribe to topics; goes to the node returned by head
 	SubscribeTopic(*SubscribeTopicRequest, grpc.ServerStreamingServer[MessageEvent]) error
+	// Get username from userid // TODO discuss, if this should return more user info.
+	GetUser(context.Context, *GetUserRequest) (*User, error)
+	GetWholeState(context.Context, *emptypb.Empty) (*WholeState, error)
 	mustEmbedUnimplementedMessageBoardServer()
 }
 
@@ -238,6 +266,12 @@ func (UnimplementedMessageBoardServer) GetMessages(context.Context, *GetMessages
 }
 func (UnimplementedMessageBoardServer) SubscribeTopic(*SubscribeTopicRequest, grpc.ServerStreamingServer[MessageEvent]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeTopic not implemented")
+}
+func (UnimplementedMessageBoardServer) GetUser(context.Context, *GetUserRequest) (*User, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetUser not implemented")
+}
+func (UnimplementedMessageBoardServer) GetWholeState(context.Context, *emptypb.Empty) (*WholeState, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetWholeState not implemented")
 }
 func (UnimplementedMessageBoardServer) mustEmbedUnimplementedMessageBoardServer() {}
 func (UnimplementedMessageBoardServer) testEmbeddedByValue()                      {}
@@ -433,6 +467,42 @@ func _MessageBoard_SubscribeTopic_Handler(srv interface{}, stream grpc.ServerStr
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type MessageBoard_SubscribeTopicServer = grpc.ServerStreamingServer[MessageEvent]
 
+func _MessageBoard_GetUser_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetUserRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MessageBoardServer).GetUser(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MessageBoard_GetUser_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MessageBoardServer).GetUser(ctx, req.(*GetUserRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MessageBoard_GetWholeState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MessageBoardServer).GetWholeState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MessageBoard_GetWholeState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MessageBoardServer).GetWholeState(ctx, req.(*emptypb.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MessageBoard_ServiceDesc is the grpc.ServiceDesc for MessageBoard service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -475,6 +545,14 @@ var MessageBoard_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetMessages",
 			Handler:    _MessageBoard_GetMessages_Handler,
+		},
+		{
+			MethodName: "GetUser",
+			Handler:    _MessageBoard_GetUser_Handler,
+		},
+		{
+			MethodName: "GetWholeState",
+			Handler:    _MessageBoard_GetWholeState_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

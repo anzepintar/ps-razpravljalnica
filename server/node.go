@@ -42,15 +42,15 @@ func (s *RunNodeCmd) Run() error {
 type MessageBoardServer struct {
 	rpb.UnimplementedMessageBoardServer
 
-	topics_mtx sync.RWMutex
-	Topics     []Topic
-	users_mtx  sync.RWMutex
-	Users      []User
+	topics_mtx  sync.RWMutex
+	Message_idx int64
+	Topics      []Topic
+	users_mtx   sync.RWMutex
+	Users       []User
 }
 
 type Topic struct {
 	Name        string
-	Message_idx int64
 	Messages    map[int64]Message
 	Subscribers []struct {
 		Token         string
@@ -237,8 +237,8 @@ func (s *MessageBoardServer) PostMessage(_ context.Context, req *rpb.PostMessage
 	}
 
 	topic := &s.Topics[topic_id]
-	id := topic.Message_idx
-	topic.Message_idx++
+	id := s.Message_idx
+	s.Message_idx++
 	msg := Message{UserId: user_id, Text: req.Text, CreatedAt: timestamppb.Now(), Likes: map[int64]struct{}{}}
 	topic.Messages[id] = msg
 	return &rpb.Message{Id: id, UserId: msg.UserId, Text: msg.Text, CreatedAt: msg.CreatedAt, Likes: int32(len(msg.Likes))}, nil
@@ -285,6 +285,14 @@ func (s *MessageBoardServer) UpdateMessage(_ context.Context, req *rpb.UpdateMes
 		CreatedAt: message.CreatedAt,
 		Likes:     int32(len(message.Likes)),
 	}, nil
+}
+
+func (s *MessageBoardServer) GetUser(context.Context, *rpb.GetUserRequest) (*rpb.User, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetUser not implemented")
+}
+
+func (s *MessageBoardServer) GetWholeState(context.Context, *emptypb.Empty) (*rpb.WholeState, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetWholeState not implemented")
 }
 
 func (s *MessageBoardServer) topicExist(id int64) (int64, error) {

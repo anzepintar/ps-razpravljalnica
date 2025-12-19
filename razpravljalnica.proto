@@ -104,7 +104,7 @@ service  MessageBoard{
 
   // Not tail node
 
-  rpc GetWholeState(google.protobuf.Empty) returns (WholeState)
+  rpc GetWholeState(google.protobuf.Empty) returns (WholeState);
 }
 
 message CreateUserRequest {

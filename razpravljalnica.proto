@@ -60,6 +60,13 @@ message TopicState {
   map<string,NodeInfo> subscribers = 3;
 }
 
+message MessageState {
+  int64 user_id = 1;
+  string text = 2;
+  google.protobuf.Timestamp created_at = 3;
+  repeated int64 user_id_liked = 4;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Data plane
 ////////////////////////////////////////////////////////////////////////////////

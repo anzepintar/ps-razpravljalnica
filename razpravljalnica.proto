@@ -68,7 +68,7 @@ message MessageState {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Data plane
+// Data plane (client -> server; server -> server)
 ////////////////////////////////////////////////////////////////////////////////
 
 service  MessageBoard{
@@ -189,15 +189,34 @@ message GetUserRequest {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Control plane
+// Control plane (server -> control) (client -> control)
 ////////////////////////////////////////////////////////////////////////////////
 
 // Return the the head and the tail node address
 service ControlPlane {
   rpc GetClusterState(google.protobuf.Empty) returns (GetClusterStateResponse);
+  rpc Snitch(NodeInfo) returns (google.protobuf.Empty);
+  rpc Register(RegisterRequest) returns (NodeInfo);
 }
 
 message GetClusterStateResponse {
   NodeInfo head = 1;
   NodeInfo tail = 2;
+  repeated ControlInfo servers = 3;
+}
+
+message RegisterRequest {
+  string address = 1;
+}
+message ControlInfo {
+  string address = 1;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Control plane (control -> server)
+////////////////////////////////////////////////////////////////////////////////
+
+// Return the the head and the tail node address
+service ControlledPlanie {
+  rpc refreshState(google.protobuf.Empty) returns (google.protobuf.Empty);
 }

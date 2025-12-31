@@ -217,6 +217,6 @@ message ControlInfo {
 ////////////////////////////////////////////////////////////////////////////////
 
 // Return the the head and the tail node address
-service ControlledPlanie {
+service ControlledPlane {
   rpc refreshState(google.protobuf.Empty) returns (google.protobuf.Empty);
 }

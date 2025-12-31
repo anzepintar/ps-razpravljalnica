@@ -307,7 +307,7 @@ func (c *SubscribeCmd) Run(ctx *kong.Context) error {
 	reqCtx, cancel := context.WithTimeout(context.Background(), CLI.Timeout)
 	defer cancel()
 
-	subNodeResp, err := client.GetSubcscriptionNode(reqCtx, &pb.SubscriptionNodeRequest{
+	subNodeResp, err := client.GetSubscriptionNode(reqCtx, &pb.SubscriptionNodeRequest{
 		UserId:  c.UserID,
 		TopicId: topicIDs,
 	})

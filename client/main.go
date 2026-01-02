@@ -18,7 +18,7 @@ import (
 )
 
 var CLI struct {
-	Server  string        `help:"Server address (host:port)" default:"localhost:50051" name:"server" short:"s"`
+	Server  string        `help:"Server address (host:port)" default:"localhost:5000" name:"server" short:"s"`
 	Timeout time.Duration `help:"Request timeout" default:"5s" name:"timeout"`
 	Cli     CliCmds       `cmd:"" help:"Command-line client operations"`
 }

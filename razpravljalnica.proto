@@ -57,7 +57,6 @@ message WholeState {
 message TopicState {
   string name = 1;
   map<int64, MessageState> messages = 2;
-  map<string, int64> subscribers = 3;
 }
 
 message MessageState {
@@ -109,7 +108,7 @@ service  MessageBoard{
   // Get username from userid // TODO discuss, if this should return more user info.
   rpc GetUser(GetUserRequest) returns (User);
 
-  // Not tail node
+  // server - server
 
   rpc GetWholeState(google.protobuf.Empty) returns (WholeState);
 }
@@ -195,7 +194,7 @@ message GetUserRequest {
 // Return the the head and the tail node address
 service ControlPlane {
   rpc GetClusterState(google.protobuf.Empty) returns (GetClusterStateResponse);
-  rpc Snitch(NodeInfo) returns (google.protobuf.Empty);
+  rpc Snitch(SnitchRequest) returns (google.protobuf.Empty);
   rpc Register(RegisterRequest) returns (NodeInfo);
 }
 
@@ -203,6 +202,10 @@ message GetClusterStateResponse {
   NodeInfo head = 1;
   NodeInfo tail = 2;
   repeated ControlInfo servers = 3;
+}
+
+message SnitchRequest {
+        int64 node_id = 1;
 }
 
 message RegisterRequest {
@@ -218,5 +221,6 @@ message ControlInfo {
 
 // Return the the head and the tail node address
 service ControlledPlane {
-  rpc refreshState(google.protobuf.Empty) returns (google.protobuf.Empty);
+  rpc stop(google.protobuf.Empty) returns (google.protobuf.Empty);
+  rpc chainChange(google.protobuf.Empty) returns (google.protobuf.Empty);
 }

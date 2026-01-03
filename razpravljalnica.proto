@@ -57,7 +57,7 @@ message WholeState {
 message TopicState {
   string name = 1;
   map<int64, MessageState> messages = 2;
-  map<string,NodeInfo> subscribers = 3;
+  map<string, int64> subscribers = 3;
 }
 
 message MessageState {

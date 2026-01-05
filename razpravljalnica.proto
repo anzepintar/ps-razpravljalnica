@@ -193,9 +193,14 @@ message GetUserRequest {
 
 // Return the the head and the tail node address
 service ControlPlane {
-  rpc GetClusterState(google.protobuf.Empty) returns (GetClusterStateResponse);
+  rpc GetClusterStateServer(GetClusterStateRequest) returns (GetClusterStateResponse);
+  rpc GetClusterStateClient(google.protobuf.Empty) returns (GetClusterStateResponse);
   rpc Snitch(SnitchRequest) returns (google.protobuf.Empty);
   rpc Register(RegisterRequest) returns (NodeInfo);
+}
+
+message GetClusterStateRequest {
+  int64 node_id = 1;
 }
 
 message GetClusterStateResponse {
@@ -205,7 +210,7 @@ message GetClusterStateResponse {
 }
 
 message SnitchRequest {
-        int64 node_id = 1;
+  int64 node_id = 1;
 }
 
 message RegisterRequest {

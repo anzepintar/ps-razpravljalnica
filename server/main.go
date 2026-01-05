@@ -39,7 +39,6 @@ var cntrlldp = ControlledPlaneServer{
 
 func (s *RunNodeCmd) Run() error {
 	for {
-
 		lis, err := net.Listen("tcp", s.BindAddr)
 		if err != nil {
 			return fmt.Errorf("failed to listen: %v", err)
@@ -80,7 +79,7 @@ type ControlledPlaneServer struct {
 	chain_prev *Node
 	chain_next *Node
 
-	control []string
+	control map[string]struct{}
 
 	stop_chan chan struct{}
 }
@@ -99,9 +98,8 @@ type Topic struct {
 	Name        string
 	Messages    map[int64]Message
 	Subscribers []struct {
-		Token         string
-		Target_server int64
-		ch            chan<- MessageEv
+		Token string
+		ch    chan<- MessageEv
 	}
 }
 
@@ -122,8 +120,6 @@ type MessageEv struct {
 	Message        *Message
 	EventAt        *timestamppb.Timestamp
 }
-
-// TODO forward state
 
 func (s *MessageBoardServer) CreateTopic(ctx context.Context, req *rpb.CreateTopicRequest) (*rpb.Topic, error) {
 	s.topics_mtx.Lock()
@@ -234,12 +230,16 @@ func (s *MessageBoardServer) DeleteMessage(ctx context.Context, req *rpb.DeleteM
 	} else {
 		message_id = u
 	}
-	if topic.Messages[message_id].UserId != user_id {
+	msg := topic.Messages[message_id]
+	if msg.UserId != user_id {
 		return nil, status.Error(codes.PermissionDenied, "Can't delete other user's message")
 	}
 	err := fwDeleteMessage(ctx, req)
 	if err != nil {
 		return nil, err
+	}
+	for _, t := range topic.Subscribers {
+		t.ch <- MessageEv{Op: rpb.OpType_OP_DELETE, Message: &msg, EventAt: timestamppb.Now()}
 	}
 
 	delete(topic.Messages, message_id)
@@ -297,7 +297,7 @@ func (s *MessageBoardServer) GetMessages(_ context.Context, req *rpb.GetMessages
 	return &rpb.GetMessagesResponse{Messages: out}, nil
 }
 
-func (s *MessageBoardServer) GetSubscriptionNode(_ context.Context, _ *rpb.SubscriptionNodeRequest) (*rpb.SubscriptionNodeResponse, error) {
+func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *rpb.SubscriptionNodeRequest) (*rpb.SubscriptionNodeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSubcscriptionNode not implemented")
 }
 
@@ -324,29 +324,32 @@ func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *rpb.LikeMessa
 	} else {
 		message_id = u
 	}
-	message := topic.Messages[message_id]
-	if _, ok := message.Likes[user_id]; ok {
+	msg := topic.Messages[message_id]
+	if _, ok := msg.Likes[user_id]; ok {
 		return nil, status.Error(codes.AlreadyExists, "User already liked message")
 	}
-	msg, err := fwLikeMessage(ctx, req)
+	msg_next, err := fwLikeMessage(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 
-	message.Likes[user_id] = struct{}{}
-	likes := int32(len(message.Likes))
-	if msg != nil && (msg.Id != message_id || msg.Likes != likes) {
+	msg.Likes[user_id] = struct{}{}
+	likes := int32(len(msg.Likes))
+	if msg_next != nil && (msg_next.Id != message_id || msg_next.Likes != likes) {
 		cntrlldp.snitchNext()
-		delete(message.Likes, user_id)
+		delete(msg.Likes, user_id)
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
+	}
+	for _, t := range topic.Subscribers {
+		t.ch <- MessageEv{Op: rpb.OpType_OP_LIKE, Message: &msg, EventAt: timestamppb.Now()}
 	}
 
 	return &rpb.Message{
 		Id:        message_id,
 		TopicId:   topic_id,
 		UserId:    user_id,
-		Text:      message.Text,
-		CreatedAt: message.CreatedAt,
+		Text:      msg.Text,
+		CreatedAt: msg.CreatedAt,
 		Likes:     likes,
 	}, nil
 }
@@ -412,6 +415,9 @@ func (s *MessageBoardServer) PostMessage(ctx context.Context, req *rpb.PostMessa
 		cntrlldp.snitchNext()
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
+	for _, t := range topic.Subscribers {
+		t.ch <- MessageEv{Op: rpb.OpType_OP_POST, Message: &msg, EventAt: timestamppb.Now()}
+	}
 	s.Message_idx++
 	topic.Messages[id] = msg
 	return &rpb.Message{Id: id, UserId: msg.UserId, Text: msg.Text, CreatedAt: msg.CreatedAt, Likes: int32(len(msg.Likes))}, nil
@@ -476,6 +482,9 @@ func (s *MessageBoardServer) UpdateMessage(ctx context.Context, req *rpb.UpdateM
 	if next_msg != nil && (next_msg.UserId != msg.UserId || next_msg.Text != msg.Text || next_msg.CreatedAt != msg.CreatedAt || next_msg.Likes != 0) {
 		cntrlldp.snitchNext()
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
+	}
+	for _, t := range topic.Subscribers {
+		t.ch <- MessageEv{Op: rpb.OpType_OP_UPDATE, Message: &msg, EventAt: timestamppb.Now()}
 	}
 
 	topic.Messages[message_id] = msg
@@ -588,18 +597,33 @@ func (s *ControlledPlaneServer) ChainChange(ctx context.Context, emp *emptypb.Em
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	for _, k := range s.control {
+	success := false
+	for k := range s.control {
 		conn, err := grpc.NewClient(k, grpc_security_opt)
 		if err != nil {
-			return nil, err
+			continue
 		}
 		defer conn.Close()
 		client := rpb.NewControlPlaneClient(conn)
-		res, err := client.GetClusterState(context.Background(), &emptypb.Empty{})
+		res, err := client.GetClusterStateServer(context.Background(), &rpb.GetClusterStateRequest{NodeId: s.self.id})
 		if err != nil {
-			return nil, err
+			continue
 		}
-		s.self = &Node{address: res.Address, id: res.NodeId}
+		success = true
+		if res.Head != nil {
+			s.chain_next = &Node{id: res.Head.NodeId, address: res.Head.Address}
+		}
+		if res.Tail != nil {
+			s.chain_prev = &Node{id: res.Tail.NodeId, address: res.Tail.Address}
+		}
+		s.control = map[string]struct{}{}
+		for _, v := range res.Servers {
+			s.control[v.Address] = struct{}{}
+		}
+		break
+	}
+	if !success {
+		return nil, fmt.Errorf("Couldn't connect to any controll plane servers: %v", s.control)
 	}
 	return &emptypb.Empty{}, nil
 }
@@ -616,6 +640,7 @@ func (s *ControlledPlaneServer) register(self_address string, state *RunNodeCmd)
 		return err
 	}
 	s.self = &Node{address: res.Address, id: res.NodeId}
+	s.ChainChange(context.Background(), &emptypb.Empty{})
 	return nil
 }
 func (s *ControlledPlaneServer) snitchNext() {

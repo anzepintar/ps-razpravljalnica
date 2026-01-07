@@ -3,11 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/alecthomas/kong"
 	"log"
 	"net"
 	rpb "server/razpravljalnica"
 	"sync"
+
+	"github.com/alecthomas/kong"
 
 	"google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
@@ -34,6 +35,7 @@ type RunNodeCmd struct {
 
 var msrv = MessageBoardServer{}
 var cntrlldp = ControlledPlaneServer{
+	control:   map[string]struct{}{},
 	stop_chan: make(chan struct{}),
 }
 
@@ -43,11 +45,11 @@ func (s *RunNodeCmd) Run() error {
 		if err != nil {
 			return fmt.Errorf("failed to listen: %v", err)
 		}
+		cntrlldp.control[s.ControllAddress] = struct{}{}
 		err = cntrlldp.register(lis.Addr().String(), s)
 		if err != nil {
 			return fmt.Errorf("Failed to register at %v: %v", s.ControllAddress, err)
 		}
-
 		srv := grpc.NewServer()
 		go stopper(srv, &cntrlldp)
 		rpb.RegisterMessageBoardServer(srv, &msrv)
@@ -151,6 +153,7 @@ func fwCreateTopic(ctx context.Context, req *rpb.CreateTopicRequest) (*rpb.Topic
 	if cntrlldp.chain_next != nil {
 		conn, err := grpc.NewClient(cntrlldp.chain_next.address, grpc_security_opt)
 		if err != nil {
+			cntrlldp.snitchNext()
 			return nil, err
 		}
 		defer conn.Close()
@@ -193,6 +196,7 @@ func fwCreateUser(ctx context.Context, req *rpb.CreateUserRequest) (*rpb.User, e
 	if cntrlldp.chain_next != nil {
 		conn, err := grpc.NewClient(cntrlldp.chain_next.address, grpc_security_opt)
 		if err != nil {
+			cntrlldp.snitchNext()
 			return nil, err
 		}
 		defer conn.Close()
@@ -207,7 +211,6 @@ func fwCreateUser(ctx context.Context, req *rpb.CreateUserRequest) (*rpb.User, e
 }
 
 func (s *MessageBoardServer) DeleteMessage(ctx context.Context, req *rpb.DeleteMessageRequest) (*emptypb.Empty, error) {
-	// TODO subs
 	s.topics_mtx.Lock()
 	defer s.topics_mtx.Unlock()
 
@@ -252,6 +255,7 @@ func fwDeleteMessage(ctx context.Context, req *rpb.DeleteMessageRequest) error {
 	if cntrlldp.chain_next != nil {
 		conn, err := grpc.NewClient(cntrlldp.chain_next.address, grpc_security_opt)
 		if err != nil {
+			cntrlldp.snitchNext()
 			return err
 		}
 		defer conn.Close()
@@ -302,7 +306,6 @@ func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *rpb.S
 }
 
 func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *rpb.LikeMessageRequest) (*rpb.Message, error) {
-	// TODO subs
 	s.topics_mtx.Lock()
 	defer s.topics_mtx.Unlock()
 	var topic_id int64
@@ -360,6 +363,7 @@ func fwLikeMessage(ctx context.Context, req *rpb.LikeMessageRequest) (*rpb.Messa
 	if cntrlldp.chain_next != nil {
 		conn, err := grpc.NewClient(cntrlldp.chain_next.address, grpc_security_opt)
 		if err != nil {
+			cntrlldp.snitchNext()
 			return nil, err
 		}
 		defer conn.Close()
@@ -384,7 +388,6 @@ func (s *MessageBoardServer) ListTopics(_ context.Context, _ *emptypb.Empty) (*r
 }
 
 func (s *MessageBoardServer) PostMessage(ctx context.Context, req *rpb.PostMessageRequest) (*rpb.Message, error) {
-	// TODO subs
 	s.topics_mtx.Lock()
 	defer s.topics_mtx.Unlock()
 
@@ -429,6 +432,7 @@ func fwPostMessage(ctx context.Context, req *rpb.PostMessageRequest) (*rpb.Messa
 	if cntrlldp.chain_next != nil {
 		conn, err := grpc.NewClient(cntrlldp.chain_next.address, grpc_security_opt)
 		if err != nil {
+			cntrlldp.snitchNext()
 			return nil, err
 		}
 		defer conn.Close()
@@ -447,7 +451,6 @@ func (s *MessageBoardServer) SubscribeTopic(req *rpb.SubscribeTopicRequest, _ gr
 }
 
 func (s *MessageBoardServer) UpdateMessage(ctx context.Context, req *rpb.UpdateMessageRequest) (*rpb.Message, error) {
-	// TODO subs
 	s.topics_mtx.Lock()
 	defer s.topics_mtx.Unlock()
 	if len(req.Text) == 0 {
@@ -504,6 +507,7 @@ func fwUpdateMessage(ctx context.Context, req *rpb.UpdateMessageRequest) (*rpb.M
 	if cntrlldp.chain_next != nil {
 		conn, err := grpc.NewClient(cntrlldp.chain_next.address, grpc_security_opt)
 		if err != nil {
+			cntrlldp.snitchNext()
 			return nil, err
 		}
 		defer conn.Close()
@@ -601,12 +605,14 @@ func (s *ControlledPlaneServer) ChainChange(ctx context.Context, emp *emptypb.Em
 	for k := range s.control {
 		conn, err := grpc.NewClient(k, grpc_security_opt)
 		if err != nil {
+			log.Printf("failed to contact controll server %v, due to %v", k, err)
 			continue
 		}
 		defer conn.Close()
 		client := rpb.NewControlPlaneClient(conn)
 		res, err := client.GetClusterStateServer(context.Background(), &rpb.GetClusterStateRequest{NodeId: s.self.id})
 		if err != nil {
+			log.Printf("failed to contact controll server %v, due to %v", k, err)
 			continue
 		}
 		success = true
@@ -623,7 +629,7 @@ func (s *ControlledPlaneServer) ChainChange(ctx context.Context, emp *emptypb.Em
 		break
 	}
 	if !success {
-		return nil, fmt.Errorf("Couldn't connect to any controll plane servers: %v", s.control)
+		return nil, fmt.Errorf("Couldn't connect to any controll plane servers from: %v", s.control)
 	}
 	return &emptypb.Empty{}, nil
 }
@@ -643,6 +649,31 @@ func (s *ControlledPlaneServer) register(self_address string, state *RunNodeCmd)
 	s.ChainChange(context.Background(), &emptypb.Empty{})
 	return nil
 }
-func (s *ControlledPlaneServer) snitchNext() {
-	log.Panic("implement snitchNext")
+func (s *ControlledPlaneServer) snitchNext() error {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	next_id := s.chain_next.id
+
+	success := false
+	for k := range s.control {
+		conn, err := grpc.NewClient(k, grpc_security_opt)
+		if err != nil {
+			log.Printf("failed to contact controll server %v, due to %v", k, err)
+			continue
+		}
+		defer conn.Close()
+		client := rpb.NewControlPlaneClient(conn)
+		_, err = client.Snitch(context.Background(), &rpb.SnitchRequest{NodeId: next_id})
+		if err != nil {
+			log.Printf("failed to contact controll server %v, due to %v", k, err)
+			continue
+		}
+		success = true
+		break
+	}
+	if !success {
+		return fmt.Errorf("Couldn't connect to any controll plane servers: %v", s.control)
+	}
+	return nil
 }

@@ -94,12 +94,12 @@ func (s *ControlPlaneServer) GetClusterStateServer(ctx context.Context, req *rpb
 	var head *rpb.NodeInfo
 	var tail *rpb.NodeInfo
 
-	if idx < len(s.Nodes)-1 {
-		h := s.Nodes[idx+1]
+	if idx > 0 {
+		h := s.Nodes[idx-1]
 		head = &rpb.NodeInfo{NodeId: h.id, Address: h.address}
 	}
-	if idx > 0 {
-		t := s.Nodes[idx-1]
+	if idx < len(s.Nodes)-1 {
+		t := s.Nodes[idx+1]
 		tail = &rpb.NodeInfo{NodeId: t.id, Address: t.address}
 	}
 	return &rpb.GetClusterStateResponse{
@@ -146,23 +146,23 @@ func (s *ControlPlaneServer) Snitch(ctx context.Context, req *rpb.SnitchRequest)
 }
 
 func (s *ControlPlaneServer) sendUpdate(id int64) {
-	v := func() (v *Node) {
+	v_ptr := func() *Node {
 		s.mtx.RLock()
 		defer s.mtx.RUnlock()
 
 		idx := slices.IndexFunc(s.Nodes, func(e Node) bool { return e.id == id })
 		if idx == -1 {
-			return
+			return nil
 		}
-		v = &s.Nodes[idx]
-		return
+		v := s.Nodes[idx]
+		return &v
 	}()
-	if v == nil {
+	if v_ptr == nil {
 		return
 	}
-	vv := *v
+	v := *v_ptr
 
-	conn, err := grpc.NewClient(vv.address, grpc_security_opt)
+	conn, err := grpc.NewClient(v.address, grpc_security_opt)
 	if err != nil {
 		go s.removeNode(id, true)
 		return

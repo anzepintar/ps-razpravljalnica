@@ -7,9 +7,20 @@ import (
 	"math/rand"
 	"net"
 	rpb "server/razpravljalnica"
+	"slices"
+	"strconv"
 	"sync"
 
+	// "github.com/gdamore/tcell/v2"
+	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
+
 	"github.com/alecthomas/kong"
+
+	"encoding/base64"
+	"time"
+
+	"sync/atomic"
 
 	"google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
@@ -20,6 +31,8 @@ import (
 )
 
 var cli RunNodeCmd
+var app *tview.Application
+var view *tview.Frame
 
 func main() {
 	ctx := kong.Parse(&cli)
@@ -32,6 +45,7 @@ var grpc_security_opt = grpc.WithTransportCredentials(insecure.NewCredentials())
 type RunNodeCmd struct {
 	ControllAddress string `arg:""`
 	BindAddr        string `short:"b" help:"binds to this address"`
+	Tui             bool   `short:"t" help:"enable tui"`
 }
 
 var msrv = MessageBoardServer{}
@@ -45,8 +59,100 @@ func myLog(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grp
 	return resp, err
 }
 
-func (s *RunNodeCmd) Run() error {
+func tuiUpdater() {
 	for {
+		time.Sleep(time.Second)
+		app.QueueUpdateDraw(func() {
+			pages := view.GetPrimitive().(*tview.Pages)
+
+			name, page := pages.GetFrontPage()
+			if name == "users" {
+				table := page.(*tview.Table)
+				table.Clear()
+				msrv.users_mtx.RLock()
+				for id, user := range msrv.users {
+					table.SetCellSimple(id, 0, strconv.Itoa(id))
+					table.SetCellSimple(id, 1, user.name)
+				}
+				msrv.users_mtx.RUnlock()
+			}
+		})
+	}
+}
+
+func pageTitler(pages *tview.Pages) string {
+	out := make([]rune, 0)
+	page_names := pages.GetPageNames(false)
+	selected_name, _ := pages.GetFrontPage()
+	for _, v := range page_names {
+		if selected_name == v {
+			out = append(out, '[')
+			out = slices.Concat(out, []rune(v))
+			out = append(out, ']')
+		} else {
+			out = slices.Concat(out, []rune(v))
+			out = append(out, ' ')
+		}
+	}
+	return string(out)
+}
+func pageT() {
+	pages := view.GetPrimitive().(*tview.Pages)
+	view.Clear()
+	view.AddText(tview.Escape(pageTitler(pages)), true, tview.AlignCenter, tcell.ColorDefault)
+	view.AddText(cntrlldp.self.address, true, tview.AlignLeft, tcell.ColorDefault)
+}
+
+func pageFlipper(event *tcell.EventKey) *tcell.EventKey {
+	if event.Key() == tcell.KeyPgDn {
+		pages := view.GetPrimitive().(*tview.Pages)
+		fp, _ := pages.GetFrontPage()
+		pages.SendToBack(fp)
+		pageT()
+		return nil
+	} else if event.Key() == tcell.KeyPgUp {
+		pages := view.GetPrimitive().(*tview.Pages)
+		ps := pages.GetPageNames(false)
+		pages.SendToFront(ps[len(ps)-1])
+		pageT()
+		return nil
+	}
+	return event
+}
+
+func tui() {
+	app = tview.NewApplication()
+	pages := tview.NewPages()
+	view = tview.NewFrame(pages)
+	pages.AddPage("topics",
+		tview.NewFlex().
+			AddItem(tview.NewDropDown(), 0, 1, true).
+			AddItem(tview.NewTable().SetBorders(true), 0, 1, true).
+			SetBackgroundColor(tcell.ColorNone),
+		true, true)
+	users_table := tview.NewTable().SetBorders(true)
+	users_table.SetBackgroundColor(tcell.ColorNone)
+	pages.AddPage("users", users_table, true, true)
+	pages.SetBackgroundColor(tcell.ColorNone)
+	pages.SetInputCapture(pageFlipper)
+	view.SetBackgroundColor(tcell.ColorNone)
+
+	go tuiUpdater()
+
+	pageT()
+	if err := app.SetRoot(view, true).Run(); err != nil {
+		panic(err)
+	}
+	cntrlldp.should_stop.Store(true)
+	close(cntrlldp.stop_chan)
+}
+
+func (s *RunNodeCmd) Run() error {
+	for !cntrlldp.should_stop.Load() {
+		subs_ch := make(chan MessageEv)
+		msrv.subs_ch = subs_ch
+		msrv.subs = map[int64]Subscription{}
+
 		cntrlldp.stop_chan = make(chan struct{})
 		lis, err := net.Listen("tcp", s.BindAddr)
 		if err != nil {
@@ -62,14 +168,41 @@ func (s *RunNodeCmd) Run() error {
 			return fmt.Errorf("Failed to get current state: %v", err)
 		}
 		srv := grpc.NewServer(grpc.ChainUnaryInterceptor(myLog))
-		go stopper(srv, &cntrlldp)
+		go msrv.subServer(subs_ch)
+		go stopper(srv, &cntrlldp, &msrv)
 		rpb.RegisterMessageBoardServer(srv, &msrv)
 		rpb.RegisterControlledPlaneServer(srv, &cntrlldp)
 
 		log.Printf("server listening at %v", lis.Addr())
+
+		if s.Tui {
+			go tui()
+		}
 		if err := srv.Serve(lis); err != nil {
 			return fmt.Errorf("failed to serve: %v", err)
 		}
+	}
+	return nil
+}
+
+func (s *MessageBoardServer) subServer(ch <-chan MessageEv) {
+	for {
+		ev, ok := <-ch
+		if !ok {
+			return
+		}
+		func() {
+			s.subs_mtx.RLock()
+			defer s.subs_mtx.RUnlock()
+
+			for _, v := range s.subs {
+				if slices.Contains(v.topics, ev.topic) {
+					if v.ch != nil {
+						v.ch <- ev
+					}
+				}
+			}
+		}()
 	}
 }
 
@@ -102,36 +235,40 @@ func syncState() error {
 	}
 	conn, err := grpc.NewClient(head.Address, grpc_security_opt)
 	if err != nil {
+		cntrlldp.snitch(head.NodeId)
 		return err
 	}
 	defer conn.Close()
 	client := rpb.NewMessageBoardClient(conn)
 	st, err := client.GetWholeState(context.Background(), &emptypb.Empty{})
 	if err != nil {
+		cntrlldp.snitch(head.NodeId)
 		return err
 	}
-	msrv.Message_idx = st.MessageId
+	msrv.message_idx = st.MessageId
 	for _, v := range st.Users {
-		msrv.Users = append(msrv.Users, User{v})
+		msrv.users = append(msrv.users, User{v})
 	}
 	for _, v := range st.Topic {
-		tp := Topic{Name: v.Name, Messages: map[int64]Message{}}
+		tp := Topic{name: v.Name, messages: map[int64]Message{}}
 		for k, v := range v.Messages {
-			msg := Message{UserId: v.UserId, Text: v.Text, CreatedAt: v.CreatedAt, Likes: map[int64]struct{}{}}
+			msg := Message{user: v.UserId, text: v.Text, created: v.CreatedAt, likes: map[int64]struct{}{}}
 			for _, v := range v.UserIdLiked {
-				msg.Likes[v] = struct{}{}
+				msg.likes[v] = struct{}{}
 			}
-			tp.Messages[k] = msg
+			tp.messages[k] = msg
 		}
-		msrv.Topics = append(msrv.Topics, tp)
+		msrv.topics = append(msrv.topics, tp)
 	}
 
 	return nil
 }
 
-func stopper(srv *grpc.Server, cntrlldp *ControlledPlaneServer) {
-	<-cntrlldp.stop_chan
+func stopper(srv *grpc.Server, cnt *ControlledPlaneServer, msb *MessageBoardServer) {
+	<-cnt.stop_chan
+
 	srv.GracefulStop()
+	close(msb.subs_ch)
 }
 
 type Node struct {
@@ -150,44 +287,53 @@ type ControlledPlaneServer struct {
 
 	control map[string]struct{}
 
-	stop_chan chan struct{}
+	should_stop atomic.Bool
+	stop_chan   chan struct{}
 }
 
 type MessageBoardServer struct {
 	rpb.UnimplementedMessageBoardServer
 
 	topics_mtx  sync.RWMutex
-	Message_idx int64
-	Topics      []Topic
-	users_mtx   sync.RWMutex
-	Users       []User
+	message_idx int64
+	topics      []Topic
+
+	users_mtx sync.RWMutex
+	users     []User
+
+	subs_ch  chan<- MessageEv
+	subs_mtx sync.RWMutex
+	subs     map[int64]Subscription // map[user_id]
+}
+type Subscription struct {
+	token  string
+	topics []int64
+	ch     chan MessageEv
 }
 
 type Topic struct {
-	Name        string
-	Messages    map[int64]Message
-	Subscribers []struct {
-		Token string
-		ch    chan<- MessageEv
-	}
+	name     string
+	messages map[int64]Message
 }
 
 type Message struct {
-	UserId    int64
-	Text      string
-	CreatedAt *timestamppb.Timestamp
-	Likes     map[int64]struct{}
+	user    int64
+	text    string
+	created *timestamppb.Timestamp
+	likes   map[int64]struct{}
 }
 
 type User struct {
-	Name string
+	name string
 }
 
 type MessageEv struct {
-	SequenceNumber int64
-	Op             rpb.OpType
-	Message        *Message
-	EventAt        *timestamppb.Timestamp
+	sequence_number int64
+	topic           int64
+	op              rpb.OpType
+	message_id      int64
+	message         Message
+	at              *timestamppb.Timestamp
 }
 
 func (s *MessageBoardServer) CreateTopic(ctx context.Context, req *rpb.CreateTopicRequest) (*rpb.Topic, error) {
@@ -207,11 +353,11 @@ func (s *MessageBoardServer) CreateTopic(ctx context.Context, req *rpb.CreateTop
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
 
-	s.Topics = append(s.Topics, Topic{Name: name, Messages: map[int64]Message{}})
-	id := int64(len(s.Topics) - 1)
+	s.topics = append(s.topics, Topic{name: name, messages: map[int64]Message{}})
+	id := int64(len(s.topics) - 1)
 	if next_topic != nil && next_topic.Id != id {
 		go cntrlldp.snitchNext()
-		s.Topics = s.Topics[:id]
+		s.topics = s.topics[:id]
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
 	return &rpb.Topic{Id: id, Name: name}, nil
@@ -248,11 +394,11 @@ func (s *MessageBoardServer) CreateUser(ctx context.Context, req *rpb.CreateUser
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
 
-	s.Users = append(s.Users, User{Name: name})
-	id := int64(len(s.Users) - 1)
+	s.users = append(s.users, User{name: name})
+	id := int64(len(s.users) - 1)
 	if next_user != nil && next_user.Id != id {
 		go cntrlldp.snitchNext()
-		s.Users = s.Users[:id]
+		s.users = s.users[:id]
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
 	return &rpb.User{Id: id, Name: name}, nil
@@ -289,15 +435,15 @@ func (s *MessageBoardServer) DeleteMessage(ctx context.Context, req *rpb.DeleteM
 	} else {
 		user_id = u
 	}
-	topic := &s.Topics[topic_id]
+	topic := &s.topics[topic_id]
 	var message_id int64
 	if u, err := s.msgExist(topic_id, req.MessageId); err != nil {
 		return nil, err
 	} else {
 		message_id = u
 	}
-	msg := topic.Messages[message_id]
-	if msg.UserId != user_id {
+	msg := topic.messages[message_id]
+	if msg.user != user_id {
 		return nil, status.Error(codes.PermissionDenied, "Can't delete other user's message")
 	}
 	err := fwDeleteMessage(ctx, req)
@@ -307,11 +453,10 @@ func (s *MessageBoardServer) DeleteMessage(ctx context.Context, req *rpb.DeleteM
 		}
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
-	for _, t := range topic.Subscribers {
-		t.ch <- MessageEv{Op: rpb.OpType_OP_DELETE, Message: &msg, EventAt: timestamppb.Now()}
-	}
 
-	delete(topic.Messages, message_id)
+	s.subs_ch <- MessageEv{op: rpb.OpType_OP_DELETE, message: msg, at: timestamppb.Now(), topic: topic_id, message_id: message_id}
+
+	delete(topic.messages, message_id)
 	return &emptypb.Empty{}, nil
 }
 func fwDeleteMessage(ctx context.Context, req *rpb.DeleteMessageRequest) error {
@@ -348,9 +493,9 @@ func (s *MessageBoardServer) GetMessages(_ context.Context, req *rpb.GetMessages
 	} else {
 		topic_id = t
 	}
-	topic := &s.Topics[topic_id]
+	topic := &s.topics[topic_id]
 	limit := req.Limit
-	for k, v := range topic.Messages {
+	for k, v := range topic.messages {
 		if limit <= 0 {
 			break
 		}
@@ -358,10 +503,10 @@ func (s *MessageBoardServer) GetMessages(_ context.Context, req *rpb.GetMessages
 			out = append(out, &rpb.Message{
 				Id:        k,
 				TopicId:   topic_id,
-				UserId:    v.UserId,
-				Text:      v.Text,
-				CreatedAt: v.CreatedAt,
-				Likes:     int32(len(v.Likes)),
+				UserId:    v.user,
+				Text:      v.text,
+				CreatedAt: v.created,
+				Likes:     int32(len(v.likes)),
 			})
 			limit--
 		}
@@ -370,18 +515,14 @@ func (s *MessageBoardServer) GetMessages(_ context.Context, req *rpb.GetMessages
 }
 
 func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *rpb.SubscriptionNodeRequest) (*rpb.SubscriptionNodeResponse, error) {
-	log.Printf("init")
 	s.topics_mtx.Lock()
 	defer s.topics_mtx.Unlock()
 
-	if rand.Intn(100) == 0 {
-		log.Printf("decided, to go local")
+	if rand.Intn(2) == 0 {
 		return s.addSubscription(ctx, req)
 	}
-	log.Printf("sending to next")
 	ret, err := fwGetSubscriptionNode(ctx, req)
 	if err != nil {
-		log.Printf("forced, to go local")
 		return s.addSubscription(ctx, req)
 	}
 	return ret, nil
@@ -403,14 +544,13 @@ func fwGetSubscriptionNode(ctx context.Context, req *rpb.SubscriptionNodeRequest
 	return nil, status.Error(codes.NotFound, "No next node in chain.")
 }
 
-func (s *MessageBoardServer) addSubscription(ctx context.Context, req *rpb.SubscriptionNodeRequest) (*rpb.SubscriptionNodeResponse, error) {
+func (s *MessageBoardServer) addSubscription(_ context.Context, req *rpb.SubscriptionNodeRequest) (*rpb.SubscriptionNodeResponse, error) {
 	// LOCK expected
-	log.Printf("adding subscription")
-	_, err := s.userExist(req.UserId)
+	user_id, err := s.userExist(req.UserId)
 	if err != nil {
 		return nil, err
 	}
-	var topics []int64
+	var topics = make([]int64, 0, len(req.TopicId))
 	for _, v := range req.TopicId {
 		topic_id, err := s.topicExist(v)
 		if err != nil {
@@ -418,19 +558,35 @@ func (s *MessageBoardServer) addSubscription(ctx context.Context, req *rpb.Subsc
 		}
 		topics = append(topics, topic_id)
 	}
-	for _, v := range topics {
-		_ = v
-		// TODO change datastructure for subscriptions
+	token := randString(1) // TODO
+	s.subs_mtx.Lock()
+	defer s.subs_mtx.Unlock()
+
+	s.subs[user_id] = Subscription{token: token, topics: topics}
+	return &rpb.SubscriptionNodeResponse{
+		SubscribeToken: token,
+		Node:           &rpb.NodeInfo{NodeId: cntrlldp.self.id, Address: cntrlldp.self.address},
+	}, nil
+}
+func (s *MessageBoardServer) rmSubscription(user_id int64) {
+	s.subs_mtx.Lock()
+	defer s.subs_mtx.Unlock()
+	sub, ok := s.subs[user_id]
+	if !ok {
+		return
 	}
-	return &rpb.SubscriptionNodeResponse{SubscribeToken: randString(8)}, nil
+	if sub.ch != nil {
+		close(sub.ch)
+	}
+	delete(s.subs, user_id)
 }
 
 func randString(n int) string {
 	b := make([]byte, n)
 	for i := range n {
-		b[i] = byte(rand.Int()) & 0x7f
+		b[i] = byte(rand.Int())
 	}
-	return string(b)
+	return base64.StdEncoding.EncodeToString(b)
 }
 
 func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *rpb.LikeMessageRequest) (*rpb.Message, error) {
@@ -442,7 +598,7 @@ func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *rpb.LikeMessa
 	} else {
 		topic_id = t
 	}
-	topic := &s.Topics[topic_id]
+	topic := &s.topics[topic_id]
 	var user_id int64
 	if u, err := s.userExist(req.UserId); err != nil {
 		return nil, err
@@ -455,8 +611,8 @@ func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *rpb.LikeMessa
 	} else {
 		message_id = u
 	}
-	msg := topic.Messages[message_id]
-	if _, ok := msg.Likes[user_id]; ok {
+	msg := topic.messages[message_id]
+	if _, ok := msg.likes[user_id]; ok {
 		return nil, status.Error(codes.AlreadyExists, "User already liked message")
 	}
 	msg_next, err := fwLikeMessage(ctx, req)
@@ -467,23 +623,22 @@ func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *rpb.LikeMessa
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
 
-	msg.Likes[user_id] = struct{}{}
-	likes := int32(len(msg.Likes))
+	msg.likes[user_id] = struct{}{}
+	likes := int32(len(msg.likes))
 	if msg_next != nil && (msg_next.Id != message_id || msg_next.Likes != likes) {
 		go cntrlldp.snitchNext()
-		delete(msg.Likes, user_id)
+		delete(msg.likes, user_id)
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
-	for _, t := range topic.Subscribers {
-		t.ch <- MessageEv{Op: rpb.OpType_OP_LIKE, Message: &msg, EventAt: timestamppb.Now()}
-	}
+
+	s.subs_ch <- MessageEv{op: rpb.OpType_OP_LIKE, message: msg, at: timestamppb.Now(), topic: topic_id, message_id: message_id}
 
 	return &rpb.Message{
 		Id:        message_id,
 		TopicId:   topic_id,
 		UserId:    user_id,
-		Text:      msg.Text,
-		CreatedAt: msg.CreatedAt,
+		Text:      msg.text,
+		CreatedAt: msg.created,
 		Likes:     likes,
 	}, nil
 }
@@ -506,9 +661,9 @@ func fwLikeMessage(ctx context.Context, req *rpb.LikeMessageRequest) (*rpb.Messa
 func (s *MessageBoardServer) ListTopics(_ context.Context, _ *emptypb.Empty) (*rpb.ListTopicsResponse, error) {
 	s.topics_mtx.RLock()
 	defer s.topics_mtx.RUnlock()
-	out := make([]*rpb.Topic, len(s.Topics))
-	for i, v := range s.Topics {
-		out[i] = &rpb.Topic{Id: int64(i), Name: v.Name}
+	out := make([]*rpb.Topic, len(s.topics))
+	for i, v := range s.topics {
+		out[i] = &rpb.Topic{Id: int64(i), Name: v.name}
 	}
 	return &rpb.ListTopicsResponse{Topics: out}, nil
 }
@@ -540,20 +695,20 @@ func (s *MessageBoardServer) PostMessage(ctx context.Context, req *rpb.PostMessa
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
 
-	topic := &s.Topics[topic_id]
-	id := s.Message_idx
-	msg := Message{UserId: user_id, Text: req.Text, CreatedAt: timestamppb.Now(), Likes: map[int64]struct{}{}}
-	if next_msg != nil && (next_msg.UserId != msg.UserId ||
-		next_msg.Text != msg.Text || next_msg.CreatedAt != msg.CreatedAt || next_msg.Likes != 0) {
+	topic := &s.topics[topic_id]
+	id := s.message_idx
+	msg := Message{user: user_id, text: req.Text, created: timestamppb.Now(), likes: map[int64]struct{}{}}
+	if next_msg != nil && (next_msg.UserId != msg.user ||
+		next_msg.Text != msg.text || next_msg.Likes != 0) {
 		go cntrlldp.snitchNext()
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
-	for _, t := range topic.Subscribers {
-		t.ch <- MessageEv{Op: rpb.OpType_OP_POST, Message: &msg, EventAt: timestamppb.Now()}
-	}
-	s.Message_idx++
-	topic.Messages[id] = msg
-	return &rpb.Message{Id: id, UserId: msg.UserId, Text: msg.Text, CreatedAt: msg.CreatedAt, Likes: int32(len(msg.Likes))}, nil
+
+	s.subs_ch <- MessageEv{op: rpb.OpType_OP_POST, message: msg, at: timestamppb.Now(), topic: topic_id, message_id: id}
+
+	s.message_idx++
+	topic.messages[id] = msg
+	return &rpb.Message{Id: id, UserId: msg.user, Text: msg.text, CreatedAt: msg.created, Likes: int32(len(msg.likes))}, nil
 }
 func fwPostMessage(ctx context.Context, req *rpb.PostMessageRequest) (*rpb.Message, error) {
 	cntrlldp.mtx.RLock()
@@ -571,8 +726,71 @@ func fwPostMessage(ctx context.Context, req *rpb.PostMessageRequest) (*rpb.Messa
 	return nil, nil
 }
 
-func (s *MessageBoardServer) SubscribeTopic(req *rpb.SubscribeTopicRequest, _ grpc.ServerStreamingServer[rpb.MessageEvent]) error {
-	return status.Error(codes.Unimplemented, "method SubscribeTopic not implemented")
+func (s *MessageBoardServer) SubscribeTopic(req *rpb.SubscribeTopicRequest, stream grpc.ServerStreamingServer[rpb.MessageEvent]) error {
+
+	var seq_cnt int64 = 0
+
+	user_id, err := func() (int64, error) {
+		s.topics_mtx.RLock()
+		defer s.topics_mtx.RUnlock()
+		return s.userExist(req.UserId)
+	}()
+	if err != nil {
+		return err
+	}
+
+	sub, ok := func() (sub Subscription, ok bool) {
+		s.subs_mtx.RLock()
+		defer s.subs_mtx.RUnlock()
+		sub, ok = s.subs[user_id]
+		return
+	}()
+	if !ok || sub.token != req.SubscribeToken {
+		return status.Error(codes.PermissionDenied, "Invalid subscription.")
+	}
+	defer s.rmSubscription(user_id)
+	sub.ch = make(chan MessageEv)
+
+	if !slices.Equal(sub.topics, req.TopicId) {
+		return status.Error(codes.PermissionDenied, "Topic sets differ.")
+	}
+	for _, topic_id := range req.TopicId {
+		for msg_id, msg := range s.topics[topic_id].messages {
+			stream.Send(&rpb.MessageEvent{
+				SequenceNumber: seq_cnt,
+				Op:             rpb.OpType_OP_POST,
+				Message: &rpb.Message{
+					Id:        msg_id,
+					TopicId:   topic_id,
+					UserId:    msg.user,
+					Text:      msg.text,
+					CreatedAt: msg.created,
+					Likes:     int32(len(msg.likes)),
+				},
+				EventAt: nil,
+			})
+			seq_cnt++
+		}
+	}
+	for {
+		ev, ok := <-sub.ch
+		if !ok {
+			return nil
+		}
+		stream.Send(&rpb.MessageEvent{
+			SequenceNumber: seq_cnt,
+			Op:             ev.op,
+			Message: &rpb.Message{
+				Id:        ev.message_id,
+				TopicId:   ev.topic,
+				UserId:    ev.message.user,
+				Text:      ev.message.text,
+				CreatedAt: ev.message.created,
+				Likes:     int32(len(ev.message.likes)),
+			},
+		})
+		seq_cnt++
+	}
 }
 
 func (s *MessageBoardServer) UpdateMessage(ctx context.Context, req *rpb.UpdateMessageRequest) (*rpb.Message, error) {
@@ -587,7 +805,7 @@ func (s *MessageBoardServer) UpdateMessage(ctx context.Context, req *rpb.UpdateM
 	} else {
 		topic_id = t
 	}
-	topic := &s.Topics[topic_id]
+	topic := &s.topics[topic_id]
 	var user_id int64
 	if u, err := s.userExist(req.UserId); err != nil {
 		return nil, err
@@ -608,24 +826,23 @@ func (s *MessageBoardServer) UpdateMessage(ctx context.Context, req *rpb.UpdateM
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
 
-	msg := topic.Messages[message_id]
-	msg.Text = req.Text
-	if next_msg != nil && (next_msg.UserId != msg.UserId || next_msg.Text != msg.Text || next_msg.CreatedAt != msg.CreatedAt || next_msg.Likes != 0) {
+	msg := topic.messages[message_id]
+	msg.text = req.Text
+	if next_msg != nil && (next_msg.UserId != msg.user || next_msg.Text != msg.text || next_msg.CreatedAt != msg.created || next_msg.Likes != 0) {
 		go cntrlldp.snitchNext()
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
-	for _, t := range topic.Subscribers {
-		t.ch <- MessageEv{Op: rpb.OpType_OP_UPDATE, Message: &msg, EventAt: timestamppb.Now()}
-	}
 
-	topic.Messages[message_id] = msg
+	s.subs_ch <- MessageEv{op: rpb.OpType_OP_UPDATE, message: msg, at: timestamppb.Now(), topic: topic_id, message_id: message_id}
+
+	topic.messages[message_id] = msg
 	return &rpb.Message{
 		Id:        message_id,
 		TopicId:   topic_id,
 		UserId:    user_id,
-		Text:      msg.Text,
-		CreatedAt: msg.CreatedAt,
-		Likes:     int32(len(msg.Likes)),
+		Text:      msg.text,
+		CreatedAt: msg.created,
+		Likes:     int32(len(msg.likes)),
 	}, nil
 }
 func fwUpdateMessage(ctx context.Context, req *rpb.UpdateMessageRequest) (*rpb.Message, error) {
@@ -654,8 +871,8 @@ func (s *MessageBoardServer) GetUser(_ context.Context, req *rpb.GetUserRequest)
 	} else {
 		user_id = u
 	}
-	user := s.Users[user_id]
-	return &rpb.User{Id: user_id, Name: user.Name}, nil
+	user := s.users[user_id]
+	return &rpb.User{Id: user_id, Name: user.name}, nil
 }
 
 func (s *MessageBoardServer) GetWholeState(context.Context, *emptypb.Empty) (*rpb.WholeState, error) {
@@ -664,37 +881,42 @@ func (s *MessageBoardServer) GetWholeState(context.Context, *emptypb.Empty) (*rp
 	s.users_mtx.RLock()
 	defer s.users_mtx.RUnlock()
 
-	topics := make([]*rpb.TopicState, len(s.Topics))
-	for i, v := range s.Topics {
+	topics := make([]*rpb.TopicState, len(s.topics))
+	for i, v := range s.topics {
 		messages := map[int64]*rpb.MessageState{}
-		for i, v := range v.Messages {
-			likes := make([]int64, len(v.Likes))
-			for i := range v.Likes {
+		for i, v := range v.messages {
+			likes := make([]int64, len(v.likes))
+			for i := range v.likes {
 				likes = append(likes, i)
 			}
 			messages[i] = &rpb.MessageState{
-				UserId:      v.UserId,
-				Text:        v.Text,
-				CreatedAt:   v.CreatedAt,
+				UserId:      v.user,
+				Text:        v.text,
+				CreatedAt:   v.created,
 				UserIdLiked: likes,
 			}
 		}
 		topics[i] = &rpb.TopicState{
-			Name:     v.Name,
+			Name:     v.name,
 			Messages: messages,
 		}
 	}
+	users := make([]string, len(s.users))
+	for i, v := range s.users {
+		users[i] = v.name
+	}
 
 	out := rpb.WholeState{
-		MessageId: s.Message_idx,
+		MessageId: s.message_idx,
 		Topic:     topics,
+		Users:     users,
 	}
 	return &out, nil
 }
 
 func (s *MessageBoardServer) topicExist(id int64) (int64, error) {
 	// expects lock
-	if int64(len(s.Topics)) > id {
+	if int64(len(s.topics)) > id {
 		return id, nil
 	}
 	return 0, fmt.Errorf("Topic %d doesn't exist", id)
@@ -702,14 +924,14 @@ func (s *MessageBoardServer) topicExist(id int64) (int64, error) {
 
 func (s *MessageBoardServer) userExist(id int64) (int64, error) {
 	// expects lock
-	if int64(len(s.Users)) > id {
+	if int64(len(s.users)) > id {
 		return id, nil
 	}
 	return 0, fmt.Errorf("User %d doesn't exist", id)
 }
 func (s *MessageBoardServer) msgExist(topic_id, id int64) (int64, error) {
 	// expects lock
-	if _, ok := s.Topics[topic_id].Messages[id]; ok {
+	if _, ok := s.topics[topic_id].messages[id]; ok {
 		return id, nil
 	}
 	return 0, fmt.Errorf("Message %d doesn't exist", id)
@@ -740,14 +962,14 @@ func (s *ControlledPlaneServer) ChainChange(ctx context.Context, emp *emptypb.Em
 		}
 		success = true
 		if res.Head != nil {
-			s.chain_next = &Node{id: res.Head.NodeId, address: res.Head.Address}
-		} else {
-			s.chain_next = nil
-		}
-		if res.Tail != nil {
-			s.chain_prev = &Node{id: res.Tail.NodeId, address: res.Tail.Address}
+			s.chain_prev = &Node{id: res.Head.NodeId, address: res.Head.Address}
 		} else {
 			s.chain_prev = nil
+		}
+		if res.Tail != nil {
+			s.chain_next = &Node{id: res.Tail.NodeId, address: res.Tail.Address}
+		} else {
+			s.chain_next = nil
 		}
 		s.control = map[string]struct{}{}
 		for _, v := range res.Servers {
@@ -782,6 +1004,10 @@ func (s *ControlledPlaneServer) snitchNext() error {
 
 	next_id := s.chain_next.id
 
+	return s.snitch(next_id)
+}
+
+func (s *ControlledPlaneServer) snitch(id int64) error {
 	success := false
 	for k := range s.control {
 		conn, err := grpc.NewClient(k, grpc_security_opt)
@@ -791,7 +1017,7 @@ func (s *ControlledPlaneServer) snitchNext() error {
 		}
 		defer conn.Close()
 		client := rpb.NewControlPlaneClient(conn)
-		_, err = client.Snitch(context.Background(), &rpb.SnitchRequest{NodeId: next_id})
+		_, err = client.Snitch(context.Background(), &rpb.SnitchRequest{NodeId: id})
 		if err != nil {
 			log.Printf("failed to contact controll server %v, due to %v", k, err)
 			continue

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	rpb "server/razpravljalnica"
 	"sync"
@@ -35,12 +36,18 @@ type RunNodeCmd struct {
 
 var msrv = MessageBoardServer{}
 var cntrlldp = ControlledPlaneServer{
-	control:   map[string]struct{}{},
-	stop_chan: make(chan struct{}),
+	control: map[string]struct{}{},
+}
+
+func myLog(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+	resp, err = handler(ctx, req)
+	log.Printf("%v(%+v) -> %+v %v", info.FullMethod, req, resp, err)
+	return resp, err
 }
 
 func (s *RunNodeCmd) Run() error {
 	for {
+		cntrlldp.stop_chan = make(chan struct{})
 		lis, err := net.Listen("tcp", s.BindAddr)
 		if err != nil {
 			return fmt.Errorf("failed to listen: %v", err)
@@ -50,7 +57,11 @@ func (s *RunNodeCmd) Run() error {
 		if err != nil {
 			return fmt.Errorf("Failed to register at %v: %v", s.ControllAddress, err)
 		}
-		srv := grpc.NewServer()
+		err = syncState()
+		if err != nil {
+			return fmt.Errorf("Failed to get current state: %v", err)
+		}
+		srv := grpc.NewServer(grpc.ChainUnaryInterceptor(myLog))
 		go stopper(srv, &cntrlldp)
 		rpb.RegisterMessageBoardServer(srv, &msrv)
 		rpb.RegisterControlledPlaneServer(srv, &cntrlldp)
@@ -60,6 +71,62 @@ func (s *RunNodeCmd) Run() error {
 			return fmt.Errorf("failed to serve: %v", err)
 		}
 	}
+}
+
+func syncState() error {
+	var res *rpb.GetClusterStateResponse
+	success := false
+	for k := range cntrlldp.control {
+		conn, err := grpc.NewClient(k, grpc_security_opt)
+		if err != nil {
+			log.Printf("failed to contact controll server %v, due to %v", k, err)
+			continue
+		}
+		defer conn.Close()
+		client := rpb.NewControlPlaneClient(conn)
+		res, err = client.GetClusterStateClient(context.Background(), &emptypb.Empty{})
+		if err != nil {
+			log.Printf("failed to contact controll server %v, due to %v", k, err)
+			continue
+		}
+		success = true
+		break
+	}
+	if !success {
+		return fmt.Errorf("Couldn't connect to any controll plane servers: %v", cntrlldp.control)
+	}
+
+	head := res.Head
+	if head == nil || head.Address == cntrlldp.self.address {
+		return nil
+	}
+	conn, err := grpc.NewClient(head.Address, grpc_security_opt)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	client := rpb.NewMessageBoardClient(conn)
+	st, err := client.GetWholeState(context.Background(), &emptypb.Empty{})
+	if err != nil {
+		return err
+	}
+	msrv.Message_idx = st.MessageId
+	for _, v := range st.Users {
+		msrv.Users = append(msrv.Users, User{v})
+	}
+	for _, v := range st.Topic {
+		tp := Topic{Name: v.Name, Messages: map[int64]Message{}}
+		for k, v := range v.Messages {
+			msg := Message{UserId: v.UserId, Text: v.Text, CreatedAt: v.CreatedAt, Likes: map[int64]struct{}{}}
+			for _, v := range v.UserIdLiked {
+				msg.Likes[v] = struct{}{}
+			}
+			tp.Messages[k] = msg
+		}
+		msrv.Topics = append(msrv.Topics, tp)
+	}
+
+	return nil
 }
 
 func stopper(srv *grpc.Server, cntrlldp *ControlledPlaneServer) {
@@ -134,13 +201,16 @@ func (s *MessageBoardServer) CreateTopic(ctx context.Context, req *rpb.CreateTop
 
 	next_topic, err := fwCreateTopic(ctx, req)
 	if err != nil {
-		return nil, err
+		if status.Code(err) != codes.Internal {
+			go cntrlldp.snitchNext()
+		}
+		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
 
 	s.Topics = append(s.Topics, Topic{Name: name, Messages: map[int64]Message{}})
 	id := int64(len(s.Topics) - 1)
 	if next_topic != nil && next_topic.Id != id {
-		cntrlldp.snitchNext()
+		go cntrlldp.snitchNext()
 		s.Topics = s.Topics[:id]
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
@@ -153,16 +223,11 @@ func fwCreateTopic(ctx context.Context, req *rpb.CreateTopicRequest) (*rpb.Topic
 	if cntrlldp.chain_next != nil {
 		conn, err := grpc.NewClient(cntrlldp.chain_next.address, grpc_security_opt)
 		if err != nil {
-			cntrlldp.snitchNext()
 			return nil, err
 		}
 		defer conn.Close()
 		client := rpb.NewMessageBoardClient(conn)
-		topic, err := client.CreateTopic(ctx, req)
-		if err != nil {
-			return nil, err
-		}
-		return topic, nil
+		return client.CreateTopic(ctx, req)
 	}
 	return nil, nil
 }
@@ -177,13 +242,16 @@ func (s *MessageBoardServer) CreateUser(ctx context.Context, req *rpb.CreateUser
 	}
 	next_user, err := fwCreateUser(ctx, req)
 	if err != nil {
-		return nil, err
+		if status.Code(err) != codes.Internal {
+			go cntrlldp.snitchNext()
+		}
+		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
 
 	s.Users = append(s.Users, User{Name: name})
 	id := int64(len(s.Users) - 1)
 	if next_user != nil && next_user.Id != id {
-		cntrlldp.snitchNext()
+		go cntrlldp.snitchNext()
 		s.Users = s.Users[:id]
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
@@ -196,16 +264,11 @@ func fwCreateUser(ctx context.Context, req *rpb.CreateUserRequest) (*rpb.User, e
 	if cntrlldp.chain_next != nil {
 		conn, err := grpc.NewClient(cntrlldp.chain_next.address, grpc_security_opt)
 		if err != nil {
-			cntrlldp.snitchNext()
 			return nil, err
 		}
 		defer conn.Close()
 		client := rpb.NewMessageBoardClient(conn)
-		user, err := client.CreateUser(ctx, req)
-		if err != nil {
-			return nil, err
-		}
-		return user, nil
+		return client.CreateUser(ctx, req)
 	}
 	return nil, nil
 }
@@ -239,7 +302,10 @@ func (s *MessageBoardServer) DeleteMessage(ctx context.Context, req *rpb.DeleteM
 	}
 	err := fwDeleteMessage(ctx, req)
 	if err != nil {
-		return nil, err
+		if status.Code(err) != codes.Internal {
+			go cntrlldp.snitchNext()
+		}
+		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
 	for _, t := range topic.Subscribers {
 		t.ch <- MessageEv{Op: rpb.OpType_OP_DELETE, Message: &msg, EventAt: timestamppb.Now()}
@@ -255,14 +321,16 @@ func fwDeleteMessage(ctx context.Context, req *rpb.DeleteMessageRequest) error {
 	if cntrlldp.chain_next != nil {
 		conn, err := grpc.NewClient(cntrlldp.chain_next.address, grpc_security_opt)
 		if err != nil {
-			cntrlldp.snitchNext()
 			return err
 		}
 		defer conn.Close()
 		client := rpb.NewMessageBoardClient(conn)
-		_, err = client.DeleteMessage(ctx, req)
+		ret, err := client.DeleteMessage(ctx, req)
 		if err != nil {
 			return err
+		}
+		if ret == nil {
+			return status.Error(codes.Canceled, "Failed to delete")
 		}
 		return nil
 	}
@@ -302,7 +370,67 @@ func (s *MessageBoardServer) GetMessages(_ context.Context, req *rpb.GetMessages
 }
 
 func (s *MessageBoardServer) GetSubscriptionNode(ctx context.Context, req *rpb.SubscriptionNodeRequest) (*rpb.SubscriptionNodeResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetSubcscriptionNode not implemented")
+	log.Printf("init")
+	s.topics_mtx.Lock()
+	defer s.topics_mtx.Unlock()
+
+	if rand.Intn(100) == 0 {
+		log.Printf("decided, to go local")
+		return s.addSubscription(ctx, req)
+	}
+	log.Printf("sending to next")
+	ret, err := fwGetSubscriptionNode(ctx, req)
+	if err != nil {
+		log.Printf("forced, to go local")
+		return s.addSubscription(ctx, req)
+	}
+	return ret, nil
+}
+
+func fwGetSubscriptionNode(ctx context.Context, req *rpb.SubscriptionNodeRequest) (*rpb.SubscriptionNodeResponse, error) {
+	cntrlldp.mtx.RLock()
+	defer cntrlldp.mtx.RUnlock()
+
+	if cntrlldp.chain_next != nil {
+		conn, err := grpc.NewClient(cntrlldp.chain_next.address, grpc_security_opt)
+		if err != nil {
+			return nil, err
+		}
+		defer conn.Close()
+		client := rpb.NewMessageBoardClient(conn)
+		return client.GetSubscriptionNode(ctx, req)
+	}
+	return nil, status.Error(codes.NotFound, "No next node in chain.")
+}
+
+func (s *MessageBoardServer) addSubscription(ctx context.Context, req *rpb.SubscriptionNodeRequest) (*rpb.SubscriptionNodeResponse, error) {
+	// LOCK expected
+	log.Printf("adding subscription")
+	_, err := s.userExist(req.UserId)
+	if err != nil {
+		return nil, err
+	}
+	var topics []int64
+	for _, v := range req.TopicId {
+		topic_id, err := s.topicExist(v)
+		if err != nil {
+			return nil, err
+		}
+		topics = append(topics, topic_id)
+	}
+	for _, v := range topics {
+		_ = v
+		// TODO change datastructure for subscriptions
+	}
+	return &rpb.SubscriptionNodeResponse{SubscribeToken: randString(8)}, nil
+}
+
+func randString(n int) string {
+	b := make([]byte, n)
+	for i := range n {
+		b[i] = byte(rand.Int()) & 0x7f
+	}
+	return string(b)
 }
 
 func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *rpb.LikeMessageRequest) (*rpb.Message, error) {
@@ -333,13 +461,16 @@ func (s *MessageBoardServer) LikeMessage(ctx context.Context, req *rpb.LikeMessa
 	}
 	msg_next, err := fwLikeMessage(ctx, req)
 	if err != nil {
-		return nil, err
+		if status.Code(err) != codes.Internal {
+			go cntrlldp.snitchNext()
+		}
+		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
 
 	msg.Likes[user_id] = struct{}{}
 	likes := int32(len(msg.Likes))
 	if msg_next != nil && (msg_next.Id != message_id || msg_next.Likes != likes) {
-		cntrlldp.snitchNext()
+		go cntrlldp.snitchNext()
 		delete(msg.Likes, user_id)
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
@@ -363,16 +494,11 @@ func fwLikeMessage(ctx context.Context, req *rpb.LikeMessageRequest) (*rpb.Messa
 	if cntrlldp.chain_next != nil {
 		conn, err := grpc.NewClient(cntrlldp.chain_next.address, grpc_security_opt)
 		if err != nil {
-			cntrlldp.snitchNext()
 			return nil, err
 		}
 		defer conn.Close()
 		client := rpb.NewMessageBoardClient(conn)
-		msg, err := client.LikeMessage(ctx, req)
-		if err != nil {
-			return nil, err
-		}
-		return msg, nil
+		return client.LikeMessage(ctx, req)
 	}
 	return nil, nil
 }
@@ -408,14 +534,18 @@ func (s *MessageBoardServer) PostMessage(ctx context.Context, req *rpb.PostMessa
 	}
 	next_msg, err := fwPostMessage(ctx, req)
 	if err != nil {
-		return nil, err
+		if status.Code(err) != codes.Internal {
+			go cntrlldp.snitchNext()
+		}
+		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
 
 	topic := &s.Topics[topic_id]
 	id := s.Message_idx
 	msg := Message{UserId: user_id, Text: req.Text, CreatedAt: timestamppb.Now(), Likes: map[int64]struct{}{}}
-	if next_msg != nil && (next_msg.UserId != msg.UserId || next_msg.Text != msg.Text || next_msg.CreatedAt != msg.CreatedAt || next_msg.Likes != 0) {
-		cntrlldp.snitchNext()
+	if next_msg != nil && (next_msg.UserId != msg.UserId ||
+		next_msg.Text != msg.Text || next_msg.CreatedAt != msg.CreatedAt || next_msg.Likes != 0) {
+		go cntrlldp.snitchNext()
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
 	for _, t := range topic.Subscribers {
@@ -432,16 +562,11 @@ func fwPostMessage(ctx context.Context, req *rpb.PostMessageRequest) (*rpb.Messa
 	if cntrlldp.chain_next != nil {
 		conn, err := grpc.NewClient(cntrlldp.chain_next.address, grpc_security_opt)
 		if err != nil {
-			cntrlldp.snitchNext()
 			return nil, err
 		}
 		defer conn.Close()
 		client := rpb.NewMessageBoardClient(conn)
-		msg, err := client.PostMessage(ctx, req)
-		if err != nil {
-			return nil, err
-		}
-		return msg, nil
+		return client.PostMessage(ctx, req)
 	}
 	return nil, nil
 }
@@ -477,13 +602,16 @@ func (s *MessageBoardServer) UpdateMessage(ctx context.Context, req *rpb.UpdateM
 	}
 	next_msg, err := fwUpdateMessage(ctx, req)
 	if err != nil {
-		return nil, err
+		if status.Code(err) != codes.Internal {
+			go cntrlldp.snitchNext()
+		}
+		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
 
 	msg := topic.Messages[message_id]
 	msg.Text = req.Text
 	if next_msg != nil && (next_msg.UserId != msg.UserId || next_msg.Text != msg.Text || next_msg.CreatedAt != msg.CreatedAt || next_msg.Likes != 0) {
-		cntrlldp.snitchNext()
+		go cntrlldp.snitchNext()
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
 	for _, t := range topic.Subscribers {
@@ -507,16 +635,11 @@ func fwUpdateMessage(ctx context.Context, req *rpb.UpdateMessageRequest) (*rpb.M
 	if cntrlldp.chain_next != nil {
 		conn, err := grpc.NewClient(cntrlldp.chain_next.address, grpc_security_opt)
 		if err != nil {
-			cntrlldp.snitchNext()
 			return nil, err
 		}
 		defer conn.Close()
 		client := rpb.NewMessageBoardClient(conn)
-		msg, err := client.UpdateMessage(ctx, req)
-		if err != nil {
-			return nil, err
-		}
-		return msg, nil
+		return client.UpdateMessage(ctx, req)
 	}
 	return nil, nil
 }
@@ -618,9 +741,13 @@ func (s *ControlledPlaneServer) ChainChange(ctx context.Context, emp *emptypb.Em
 		success = true
 		if res.Head != nil {
 			s.chain_next = &Node{id: res.Head.NodeId, address: res.Head.Address}
+		} else {
+			s.chain_next = nil
 		}
 		if res.Tail != nil {
 			s.chain_prev = &Node{id: res.Tail.NodeId, address: res.Tail.Address}
+		} else {
+			s.chain_prev = nil
 		}
 		s.control = map[string]struct{}{}
 		for _, v := range res.Servers {

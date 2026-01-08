@@ -39,11 +39,17 @@ var cntsrv = ControlPlaneServer{}
 
 func statePrinter() {
 	for {
-		// cntsrv.mtx.RLock()
-		log.Printf(".{.idx = %v, .nodes = %+v}\n", cntsrv.Idx, cntsrv.Nodes)
-		// cntsrv.mtx.RUnlock()
+		cntsrv.mtx.RLock()
+		log.Printf(".{ .idx = %v, .nodes = %v }\n", cntsrv.Idx, cntsrv.Nodes)
+		cntsrv.mtx.RUnlock()
 		time.Sleep(time.Second)
 	}
+}
+
+func myLog(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+	resp, err = handler(ctx, req)
+	log.Printf("%v(%+v) -> %+v %v", info.FullMethod, req, resp, err)
+	return resp, err
 }
 
 func (s *RunControlCmd) Run() error {
@@ -53,7 +59,7 @@ func (s *RunControlCmd) Run() error {
 		return fmt.Errorf("failed to listen: %v", err)
 	}
 	cntsrv.self = lis.Addr().String()
-	srv := grpc.NewServer()
+	srv := grpc.NewServer(grpc.ChainUnaryInterceptor(myLog))
 	rpb.RegisterControlPlaneServer(srv, &cntsrv)
 	log.Printf("server listening at %v", lis.Addr())
 	if err := srv.Serve(lis); err != nil {
@@ -101,7 +107,6 @@ func (s *ControlPlaneServer) GetClusterStateServer(ctx context.Context, req *rpb
 		Tail:    tail,
 		Servers: []*rpb.ControlInfo{{Address: s.self}}, // TODO
 	}, nil
-	// return nil, status.Error(codes.Unimplemented, "method GetClusterStateServer not implemented")
 }
 func (s *ControlPlaneServer) GetClusterStateClient(context.Context, *emptypb.Empty) (*rpb.GetClusterStateResponse, error) {
 	s.mtx.RLock()
@@ -122,6 +127,10 @@ func (s *ControlPlaneServer) Register(ctx context.Context, req *rpb.RegisterRequ
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
+	if idx := slices.IndexFunc(s.Nodes, func(e Node) bool { return e.address == req.Address }); idx != -1 {
+		go s.removeNode(s.Nodes[idx].id, false)
+	}
+
 	id := s.Idx
 	s.Idx++
 	s.Nodes = append(s.Nodes, Node{id: id, address: req.Address})
@@ -132,37 +141,42 @@ func (s *ControlPlaneServer) Register(ctx context.Context, req *rpb.RegisterRequ
 	return &rpb.NodeInfo{NodeId: id, Address: req.Address}, nil
 }
 func (s *ControlPlaneServer) Snitch(ctx context.Context, req *rpb.SnitchRequest) (*emptypb.Empty, error) {
-	go s.removeNode(req.NodeId)
+	go s.removeNode(req.NodeId, true)
 	return &emptypb.Empty{}, nil
 }
 
 func (s *ControlPlaneServer) sendUpdate(id int64) {
-	s.mtx.RLock()
-	defer s.mtx.RUnlock()
+	v := func() (v *Node) {
+		s.mtx.RLock()
+		defer s.mtx.RUnlock()
 
-	idx := slices.IndexFunc(s.Nodes, func(e Node) bool { return e.id == id })
-	if idx == -1 {
+		idx := slices.IndexFunc(s.Nodes, func(e Node) bool { return e.id == id })
+		if idx == -1 {
+			return
+		}
+		v = &s.Nodes[idx]
+		return
+	}()
+	if v == nil {
 		return
 	}
-	v := s.Nodes[idx]
+	vv := *v
 
-	conn, err := grpc.NewClient(v.address, grpc_security_opt)
+	conn, err := grpc.NewClient(vv.address, grpc_security_opt)
 	if err != nil {
-		log.Printf("removing node %v due to %v", idx, err)
-		go s.removeNode(id)
+		go s.removeNode(id, true)
 		return
 	}
 	defer conn.Close()
 	client := rpb.NewControlledPlaneClient(conn)
 	_, err = client.ChainChange(context.Background(), &emptypb.Empty{})
 	if err != nil {
-		log.Printf("removing node %v due to %v", idx, err)
-		go s.removeNode(id)
+		go s.removeNode(id, true)
 		return
 	}
 }
 
-func (s *ControlPlaneServer) removeNode(id int64) {
+func (s *ControlPlaneServer) removeNode(id int64, shutdown bool) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
@@ -177,5 +191,21 @@ func (s *ControlPlaneServer) removeNode(id int64) {
 		go s.sendUpdate(s.Nodes[idx+1].id)
 	}
 
+	if shutdown {
+		go sendShutdown(s.Nodes[idx].address)
+	}
 	s.Nodes = slices.Delete(s.Nodes, idx, idx+1)
+}
+
+func sendShutdown(addr string) {
+	conn, err := grpc.NewClient(addr, grpc_security_opt)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	client := rpb.NewControlledPlaneClient(conn)
+	_, err = client.Stop(context.Background(), &emptypb.Empty{})
+	if err != nil {
+		return
+	}
 }

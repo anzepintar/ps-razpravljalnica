@@ -566,9 +566,10 @@ var MessageBoard_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	ControlPlane_GetClusterState_FullMethodName = "/razpravljalnica.ControlPlane/GetClusterState"
-	ControlPlane_Snitch_FullMethodName          = "/razpravljalnica.ControlPlane/Snitch"
-	ControlPlane_Register_FullMethodName        = "/razpravljalnica.ControlPlane/Register"
+	ControlPlane_GetClusterStateServer_FullMethodName = "/razpravljalnica.ControlPlane/GetClusterStateServer"
+	ControlPlane_GetClusterStateClient_FullMethodName = "/razpravljalnica.ControlPlane/GetClusterStateClient"
+	ControlPlane_Snitch_FullMethodName                = "/razpravljalnica.ControlPlane/Snitch"
+	ControlPlane_Register_FullMethodName              = "/razpravljalnica.ControlPlane/Register"
 )
 
 // ControlPlaneClient is the client API for ControlPlane service.
@@ -577,8 +578,9 @@ const (
 //
 // Return the the head and the tail node address
 type ControlPlaneClient interface {
-	GetClusterState(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*GetClusterStateResponse, error)
-	Snitch(ctx context.Context, in *NodeInfo, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	GetClusterStateServer(ctx context.Context, in *GetClusterStateRequest, opts ...grpc.CallOption) (*GetClusterStateResponse, error)
+	GetClusterStateClient(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*GetClusterStateResponse, error)
+	Snitch(ctx context.Context, in *SnitchRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	Register(ctx context.Context, in *RegisterRequest, opts ...grpc.CallOption) (*NodeInfo, error)
 }
 
@@ -590,17 +592,27 @@ func NewControlPlaneClient(cc grpc.ClientConnInterface) ControlPlaneClient {
 	return &controlPlaneClient{cc}
 }
 
-func (c *controlPlaneClient) GetClusterState(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*GetClusterStateResponse, error) {
+func (c *controlPlaneClient) GetClusterStateServer(ctx context.Context, in *GetClusterStateRequest, opts ...grpc.CallOption) (*GetClusterStateResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetClusterStateResponse)
-	err := c.cc.Invoke(ctx, ControlPlane_GetClusterState_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, ControlPlane_GetClusterStateServer_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *controlPlaneClient) Snitch(ctx context.Context, in *NodeInfo, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (c *controlPlaneClient) GetClusterStateClient(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*GetClusterStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetClusterStateResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_GetClusterStateClient_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) Snitch(ctx context.Context, in *SnitchRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, ControlPlane_Snitch_FullMethodName, in, out, cOpts...)
@@ -626,8 +638,9 @@ func (c *controlPlaneClient) Register(ctx context.Context, in *RegisterRequest, 
 //
 // Return the the head and the tail node address
 type ControlPlaneServer interface {
-	GetClusterState(context.Context, *emptypb.Empty) (*GetClusterStateResponse, error)
-	Snitch(context.Context, *NodeInfo) (*emptypb.Empty, error)
+	GetClusterStateServer(context.Context, *GetClusterStateRequest) (*GetClusterStateResponse, error)
+	GetClusterStateClient(context.Context, *emptypb.Empty) (*GetClusterStateResponse, error)
+	Snitch(context.Context, *SnitchRequest) (*emptypb.Empty, error)
 	Register(context.Context, *RegisterRequest) (*NodeInfo, error)
 	mustEmbedUnimplementedControlPlaneServer()
 }
@@ -639,10 +652,13 @@ type ControlPlaneServer interface {
 // pointer dereference when methods are called.
 type UnimplementedControlPlaneServer struct{}
 
-func (UnimplementedControlPlaneServer) GetClusterState(context.Context, *emptypb.Empty) (*GetClusterStateResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetClusterState not implemented")
+func (UnimplementedControlPlaneServer) GetClusterStateServer(context.Context, *GetClusterStateRequest) (*GetClusterStateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetClusterStateServer not implemented")
 }
-func (UnimplementedControlPlaneServer) Snitch(context.Context, *NodeInfo) (*emptypb.Empty, error) {
+func (UnimplementedControlPlaneServer) GetClusterStateClient(context.Context, *emptypb.Empty) (*GetClusterStateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetClusterStateClient not implemented")
+}
+func (UnimplementedControlPlaneServer) Snitch(context.Context, *SnitchRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method Snitch not implemented")
 }
 func (UnimplementedControlPlaneServer) Register(context.Context, *RegisterRequest) (*NodeInfo, error) {
@@ -669,26 +685,44 @@ func RegisterControlPlaneServer(s grpc.ServiceRegistrar, srv ControlPlaneServer)
 	s.RegisterService(&ControlPlane_ServiceDesc, srv)
 }
 
-func _ControlPlane_GetClusterState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _ControlPlane_GetClusterStateServer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetClusterStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).GetClusterStateServer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_GetClusterStateServer_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).GetClusterStateServer(ctx, req.(*GetClusterStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_GetClusterStateClient_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(emptypb.Empty)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ControlPlaneServer).GetClusterState(ctx, in)
+		return srv.(ControlPlaneServer).GetClusterStateClient(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: ControlPlane_GetClusterState_FullMethodName,
+		FullMethod: ControlPlane_GetClusterStateClient_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ControlPlaneServer).GetClusterState(ctx, req.(*emptypb.Empty))
+		return srv.(ControlPlaneServer).GetClusterStateClient(ctx, req.(*emptypb.Empty))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
 func _ControlPlane_Snitch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(NodeInfo)
+	in := new(SnitchRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -700,7 +734,7 @@ func _ControlPlane_Snitch_Handler(srv interface{}, ctx context.Context, dec func
 		FullMethod: ControlPlane_Snitch_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ControlPlaneServer).Snitch(ctx, req.(*NodeInfo))
+		return srv.(ControlPlaneServer).Snitch(ctx, req.(*SnitchRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -731,8 +765,12 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*ControlPlaneServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "GetClusterState",
-			Handler:    _ControlPlane_GetClusterState_Handler,
+			MethodName: "GetClusterStateServer",
+			Handler:    _ControlPlane_GetClusterStateServer_Handler,
+		},
+		{
+			MethodName: "GetClusterStateClient",
+			Handler:    _ControlPlane_GetClusterStateClient_Handler,
 		},
 		{
 			MethodName: "Snitch",
@@ -748,7 +786,8 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	ControlledPlane_RefreshState_FullMethodName = "/razpravljalnica.ControlledPlane/refreshState"
+	ControlledPlane_Stop_FullMethodName        = "/razpravljalnica.ControlledPlane/stop"
+	ControlledPlane_ChainChange_FullMethodName = "/razpravljalnica.ControlledPlane/chainChange"
 )
 
 // ControlledPlaneClient is the client API for ControlledPlane service.
@@ -757,7 +796,8 @@ const (
 //
 // Return the the head and the tail node address
 type ControlledPlaneClient interface {
-	RefreshState(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	Stop(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	ChainChange(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
 }
 
 type controlledPlaneClient struct {
@@ -768,10 +808,20 @@ func NewControlledPlaneClient(cc grpc.ClientConnInterface) ControlledPlaneClient
 	return &controlledPlaneClient{cc}
 }
 
-func (c *controlledPlaneClient) RefreshState(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (c *controlledPlaneClient) Stop(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
-	err := c.cc.Invoke(ctx, ControlledPlane_RefreshState_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, ControlledPlane_Stop_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlledPlaneClient) ChainChange(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, ControlledPlane_ChainChange_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -784,7 +834,8 @@ func (c *controlledPlaneClient) RefreshState(ctx context.Context, in *emptypb.Em
 //
 // Return the the head and the tail node address
 type ControlledPlaneServer interface {
-	RefreshState(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
+	Stop(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
+	ChainChange(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
 	mustEmbedUnimplementedControlledPlaneServer()
 }
 
@@ -795,8 +846,11 @@ type ControlledPlaneServer interface {
 // pointer dereference when methods are called.
 type UnimplementedControlledPlaneServer struct{}
 
-func (UnimplementedControlledPlaneServer) RefreshState(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "method RefreshState not implemented")
+func (UnimplementedControlledPlaneServer) Stop(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method Stop not implemented")
+}
+func (UnimplementedControlledPlaneServer) ChainChange(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method ChainChange not implemented")
 }
 func (UnimplementedControlledPlaneServer) mustEmbedUnimplementedControlledPlaneServer() {}
 func (UnimplementedControlledPlaneServer) testEmbeddedByValue()                         {}
@@ -819,20 +873,38 @@ func RegisterControlledPlaneServer(s grpc.ServiceRegistrar, srv ControlledPlaneS
 	s.RegisterService(&ControlledPlane_ServiceDesc, srv)
 }
 
-func _ControlledPlane_RefreshState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _ControlledPlane_Stop_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(emptypb.Empty)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ControlledPlaneServer).RefreshState(ctx, in)
+		return srv.(ControlledPlaneServer).Stop(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: ControlledPlane_RefreshState_FullMethodName,
+		FullMethod: ControlledPlane_Stop_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ControlledPlaneServer).RefreshState(ctx, req.(*emptypb.Empty))
+		return srv.(ControlledPlaneServer).Stop(ctx, req.(*emptypb.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlledPlane_ChainChange_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlledPlaneServer).ChainChange(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlledPlane_ChainChange_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlledPlaneServer).ChainChange(ctx, req.(*emptypb.Empty))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -845,8 +917,12 @@ var ControlledPlane_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*ControlledPlaneServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "refreshState",
-			Handler:    _ControlledPlane_RefreshState_Handler,
+			MethodName: "stop",
+			Handler:    _ControlledPlane_Stop_Handler,
+		},
+		{
+			MethodName: "chainChange",
+			Handler:    _ControlledPlane_ChainChange_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

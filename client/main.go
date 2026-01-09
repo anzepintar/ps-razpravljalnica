@@ -87,8 +87,11 @@ type SubscribeCmd struct {
 
 func main() {
 	if len(os.Args) == 1 {
-		// TODO: TUI
-		fmt.Println("TODO: TUI not yet implemented. Use 'client cli <command>'.")
+		// TUI
+		if err := RunTUI("localhost:5000"); err != nil {
+			fmt.Printf("TUI Error: %v\n", err)
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 

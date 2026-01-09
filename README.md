@@ -21,12 +21,12 @@ go build -C control -o ../out/control .
 
 Kontrolna ravnina:
 ```bash
-./out/control .......
+./out/control localhost:6000 node1 --bootstrap-raft
 ```
 
 Strežnik:
 ```bash
-./out/server ........
+./out/server localhost:6000 -b localhost:5000
 ```
 
 Odjemalec (CLI):

@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alecthomas/kong"
@@ -15,12 +17,15 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	pb "github.com/anzepintar/ps-razpravljalnica/client/razpravljalnica"
+
+	_ "github.com/Jille/raft-grpc-leader-rpc/leaderhealth"
+	_ "google.golang.org/grpc/health"
 )
 
 var CLI struct {
-	Server  string        `help:"Server address (host:port)" default:"localhost:5000" name:"server" short:"s"`
-	Timeout time.Duration `help:"Request timeout" default:"5s" name:"timeout"`
-	Cli     CliCmds       `cmd:"" help:"Command-line client operations"`
+	EntryPoint string        `help:"Entry point address (control plane node)" default:"localhost:6000" name:"entry" short:"e"`
+	Timeout    time.Duration `help:"Request timeout" default:"5s" name:"timeout"`
+	Cli        CliCmds       `cmd:"" help:"Command-line client operations"`
 }
 
 // CLI skupine ukazov
@@ -88,7 +93,7 @@ type SubscribeCmd struct {
 func main() {
 	if len(os.Args) == 1 {
 		// TUI
-		if err := RunTUI("localhost:5000"); err != nil {
+		if err := RunTUI("localhost:6000"); err != nil {
 			fmt.Printf("TUI Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -107,29 +112,211 @@ func main() {
 	}
 }
 
-func getGRPCClient() (pb.MessageBoardClient, *grpc.ClientConn, error) {
-	conn, err := grpc.NewClient(CLI.Server,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return nil, nil, fmt.Errorf("connection to server %s failed: %v", CLI.Server, err)
+// Ureja povezave na cluster
+// piše v head, bere iz tail
+// uporablja control plane za stanje clustra in snitching
+type ClusterClient struct {
+	mtx sync.RWMutex
+
+	entryPoint string
+
+	// Control plane nodes - raft cluster
+	controlAddrs  []string
+	controlConn   *grpc.ClientConn
+	controlClient pb.ControlPlaneClient
+
+	// Data plane nodes
+	headAddr   string
+	headConn   *grpc.ClientConn
+	headClient pb.MessageBoardClient
+
+	tailAddr   string
+	tailConn   *grpc.ClientConn
+	tailClient pb.MessageBoardClient
+}
+
+func NewClusterClient(entryPoint string) (*ClusterClient, error) {
+	c := &ClusterClient{
+		entryPoint: entryPoint,
 	}
 
-	client := pb.NewMessageBoardClient(conn)
-	return client, conn, nil
+	if err := c.refreshClusterState(); err != nil {
+		return nil, err
+	}
+
+	return c, nil
+}
+
+func (c *ClusterClient) refreshClusterState() error {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+
+	// najprej povezava na vhodni node
+	conn, err := grpc.NewClient(c.entryPoint,
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("failed to connect to entry point %s: %v", c.entryPoint, err)
+	}
+
+	client := pb.NewControlPlaneClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	state, err := client.GetClusterStateClient(ctx, &emptypb.Empty{})
+	conn.Close()
+	if err != nil {
+		return fmt.Errorf("failed to get cluster state: %v", err)
+	}
+
+	c.controlAddrs = make([]string, len(state.Servers))
+	for i, s := range state.Servers {
+		c.controlAddrs[i] = s.Address
+	}
+
+	//  multi:///  naslov
+	if len(c.controlAddrs) > 0 {
+		multiAddr := "multi:///" + strings.Join(c.controlAddrs, ",")
+		if c.controlConn != nil {
+			c.controlConn.Close()
+		}
+		c.controlConn, err = grpc.NewClient(multiAddr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithDefaultServiceConfig(`{"healthCheckConfig": {"serviceName": ""}}`),
+		)
+		if err != nil {
+			log.Printf("Warning: could not create multi-resolver connection: %v", err)
+			c.controlConn, err = grpc.NewClient(c.controlAddrs[0],
+				grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				return fmt.Errorf("failed to connect to control plane: %v", err)
+			}
+		}
+		c.controlClient = pb.NewControlPlaneClient(c.controlConn)
+	}
+
+	// head za pisanje
+	if state.Head != nil {
+		if c.headConn != nil && c.headAddr != state.Head.Address {
+			c.headConn.Close()
+		}
+		if c.headAddr != state.Head.Address {
+			c.headAddr = state.Head.Address
+			c.headConn, err = grpc.NewClient(c.headAddr,
+				grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				return fmt.Errorf("failed to connect to head %s: %v", c.headAddr, err)
+			}
+			c.headClient = pb.NewMessageBoardClient(c.headConn)
+		}
+	}
+
+	// tail za branje
+	if state.Tail != nil {
+		if c.tailConn != nil && c.tailAddr != state.Tail.Address {
+			c.tailConn.Close()
+		}
+		if c.tailAddr != state.Tail.Address {
+			c.tailAddr = state.Tail.Address
+			c.tailConn, err = grpc.NewClient(c.tailAddr,
+				grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				return fmt.Errorf("failed to connect to tail %s: %v", c.tailAddr, err)
+			}
+			c.tailClient = pb.NewMessageBoardClient(c.tailConn)
+		}
+	}
+
+	return nil
+}
+
+func (c *ClusterClient) snitch(nodeAddr string) {
+	c.mtx.RLock()
+	defer c.mtx.RUnlock()
+
+	// Najde node id, in snitcha na control pane
+	for _, addr := range c.controlAddrs {
+		conn, err := grpc.NewClient(addr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			continue
+		}
+		client := pb.NewControlPlaneClient(conn)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		// osvežitev
+		_, _ = client.GetClusterStateClient(ctx, &emptypb.Empty{})
+		cancel()
+		conn.Close()
+		break
+	}
+}
+
+func (c *ClusterClient) WriteClient() pb.MessageBoardClient {
+	c.mtx.RLock()
+	defer c.mtx.RUnlock()
+	return c.headClient
+}
+
+func (c *ClusterClient) ReadClient() pb.MessageBoardClient {
+	c.mtx.RLock()
+	defer c.mtx.RUnlock()
+	return c.tailClient
+}
+
+func (c *ClusterClient) HeadAddr() string {
+	c.mtx.RLock()
+	defer c.mtx.RUnlock()
+	return c.headAddr
+}
+
+func (c *ClusterClient) TailAddr() string {
+	c.mtx.RLock()
+	defer c.mtx.RUnlock()
+	return c.tailAddr
+}
+
+func (c *ClusterClient) Close() {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+	if c.headConn != nil {
+		c.headConn.Close()
+	}
+	if c.tailConn != nil {
+		c.tailConn.Close()
+	}
+	if c.controlConn != nil {
+		c.controlConn.Close()
+	}
+}
+
+var clusterClient *ClusterClient
+
+func getClusterClient() (*ClusterClient, error) {
+	if clusterClient != nil {
+		return clusterClient, nil
+	}
+	var err error
+	clusterClient, err = NewClusterClient(CLI.EntryPoint)
+	return clusterClient, err
 }
 
 func (c *CreateUserCmd) Run(ctx *kong.Context) error {
-	client, conn, err := getGRPCClient()
+	cluster, err := getClusterClient()
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+
+	client := cluster.WriteClient()
+	if client == nil {
+		return fmt.Errorf("no head node available")
+	}
 
 	reqCtx, cancel := context.WithTimeout(context.Background(), CLI.Timeout)
 	defer cancel()
 
 	resp, err := client.CreateUser(reqCtx, &pb.CreateUserRequest{Name: c.Name})
 	if err != nil {
+		cluster.snitch(cluster.HeadAddr())
+		cluster.refreshClusterState()
 		return fmt.Errorf("error creating user: %v", err)
 	}
 	fmt.Printf("User created: ID=%d, Name=%s\n", resp.Id, resp.Name)
@@ -137,17 +324,23 @@ func (c *CreateUserCmd) Run(ctx *kong.Context) error {
 }
 
 func (c *CreateTopicCmd) Run(ctx *kong.Context) error {
-	client, conn, err := getGRPCClient()
+	cluster, err := getClusterClient()
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+
+	client := cluster.WriteClient()
+	if client == nil {
+		return fmt.Errorf("no head node available")
+	}
 
 	reqCtx, cancel := context.WithTimeout(context.Background(), CLI.Timeout)
 	defer cancel()
 
 	resp, err := client.CreateTopic(reqCtx, &pb.CreateTopicRequest{Name: c.Name})
 	if err != nil {
+		cluster.snitch(cluster.HeadAddr())
+		cluster.refreshClusterState()
 		return fmt.Errorf("error creating topic: %v", err)
 	}
 	fmt.Printf("Topic created: ID=%d, Name=%s\n", resp.Id, resp.Name)
@@ -155,11 +348,15 @@ func (c *CreateTopicCmd) Run(ctx *kong.Context) error {
 }
 
 func (c *PostMessageCmd) Run(ctx *kong.Context) error {
-	client, conn, err := getGRPCClient()
+	cluster, err := getClusterClient()
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+
+	client := cluster.WriteClient()
+	if client == nil {
+		return fmt.Errorf("no head node available")
+	}
 
 	reqCtx, cancel := context.WithTimeout(context.Background(), CLI.Timeout)
 	defer cancel()
@@ -170,6 +367,8 @@ func (c *PostMessageCmd) Run(ctx *kong.Context) error {
 		Text:    c.Text,
 	})
 	if err != nil {
+		cluster.snitch(cluster.HeadAddr())
+		cluster.refreshClusterState()
 		return fmt.Errorf("error posting message: %v", err)
 	}
 	fmt.Printf("Message posted: ID=%d, Text=%s, Likes=%d\n", resp.Id, resp.Text, resp.Likes)
@@ -177,11 +376,15 @@ func (c *PostMessageCmd) Run(ctx *kong.Context) error {
 }
 
 func (c *UpdateMsgCmd) Run(ctx *kong.Context) error {
-	client, conn, err := getGRPCClient()
+	cluster, err := getClusterClient()
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+
+	client := cluster.WriteClient()
+	if client == nil {
+		return fmt.Errorf("no head node available")
+	}
 
 	reqCtx, cancel := context.WithTimeout(context.Background(), CLI.Timeout)
 	defer cancel()
@@ -193,6 +396,8 @@ func (c *UpdateMsgCmd) Run(ctx *kong.Context) error {
 		Text:      c.Text,
 	})
 	if err != nil {
+		cluster.snitch(cluster.HeadAddr())
+		cluster.refreshClusterState()
 		return fmt.Errorf("error updating message: %v", err)
 	}
 	fmt.Printf("Message updated: ID=%d, New text=%s\n", resp.Id, resp.Text)
@@ -200,11 +405,15 @@ func (c *UpdateMsgCmd) Run(ctx *kong.Context) error {
 }
 
 func (c *DeleteMsgCmd) Run(ctx *kong.Context) error {
-	client, conn, err := getGRPCClient()
+	cluster, err := getClusterClient()
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+
+	client := cluster.WriteClient()
+	if client == nil {
+		return fmt.Errorf("no head node available")
+	}
 
 	reqCtx, cancel := context.WithTimeout(context.Background(), CLI.Timeout)
 	defer cancel()
@@ -215,6 +424,8 @@ func (c *DeleteMsgCmd) Run(ctx *kong.Context) error {
 		UserId:    c.UserID,
 	})
 	if err != nil {
+		cluster.snitch(cluster.HeadAddr())
+		cluster.refreshClusterState()
 		return fmt.Errorf("error deleting message: %v", err)
 	}
 	fmt.Println("Message successfully deleted.")
@@ -222,11 +433,15 @@ func (c *DeleteMsgCmd) Run(ctx *kong.Context) error {
 }
 
 func (c *LikeMsgCmd) Run(ctx *kong.Context) error {
-	client, conn, err := getGRPCClient()
+	cluster, err := getClusterClient()
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+
+	client := cluster.WriteClient()
+	if client == nil {
+		return fmt.Errorf("no head node available")
+	}
 
 	reqCtx, cancel := context.WithTimeout(context.Background(), CLI.Timeout)
 	defer cancel()
@@ -237,6 +452,8 @@ func (c *LikeMsgCmd) Run(ctx *kong.Context) error {
 		UserId:    c.UserID,
 	})
 	if err != nil {
+		cluster.snitch(cluster.HeadAddr())
+		cluster.refreshClusterState()
 		return fmt.Errorf("error liking message: %v", err)
 	}
 	fmt.Printf("Message liked: ID=%d, Likes=%d\n", resp.Id, resp.Likes)
@@ -244,17 +461,23 @@ func (c *LikeMsgCmd) Run(ctx *kong.Context) error {
 }
 
 func (c *ListTopicsCmd) Run(ctx *kong.Context) error {
-	client, conn, err := getGRPCClient()
+	cluster, err := getClusterClient()
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+
+	client := cluster.ReadClient()
+	if client == nil {
+		return fmt.Errorf("no tail node available")
+	}
 
 	reqCtx, cancel := context.WithTimeout(context.Background(), CLI.Timeout)
 	defer cancel()
 
 	resp, err := client.ListTopics(reqCtx, &emptypb.Empty{})
 	if err != nil {
+		cluster.snitch(cluster.TailAddr())
+		cluster.refreshClusterState()
 		return fmt.Errorf("error retrieving topics: %v", err)
 	}
 	fmt.Println("Topics list:")
@@ -265,11 +488,15 @@ func (c *ListTopicsCmd) Run(ctx *kong.Context) error {
 }
 
 func (c *GetMessagesCmd) Run(ctx *kong.Context) error {
-	client, conn, err := getGRPCClient()
+	cluster, err := getClusterClient()
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+
+	client := cluster.ReadClient()
+	if client == nil {
+		return fmt.Errorf("no tail node available")
+	}
 
 	reqCtx, cancel := context.WithTimeout(context.Background(), CLI.Timeout)
 	defer cancel()
@@ -280,6 +507,8 @@ func (c *GetMessagesCmd) Run(ctx *kong.Context) error {
 		Limit:         int32(c.Limit),
 	})
 	if err != nil {
+		cluster.snitch(cluster.TailAddr())
+		cluster.refreshClusterState()
 		return fmt.Errorf("error retrieving messages: %v", err)
 	}
 	fmt.Printf("Messages in topic %d:\n", c.TopicID)
@@ -300,11 +529,16 @@ func (c *SubscribeCmd) Run(ctx *kong.Context) error {
 		topicIDs = append(topicIDs, id)
 	}
 
-	client, conn, err := getGRPCClient()
+	cluster, err := getClusterClient()
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+
+	// GetSubscriptionNode - dejansko je write operacija, gre čez nodes
+	client := cluster.WriteClient()
+	if client == nil {
+		return fmt.Errorf("no head node available")
+	}
 
 	// Naročnina in token?
 	reqCtx, cancel := context.WithTimeout(context.Background(), CLI.Timeout)
@@ -315,6 +549,8 @@ func (c *SubscribeCmd) Run(ctx *kong.Context) error {
 		TopicId: topicIDs,
 	})
 	if err != nil {
+		cluster.snitch(cluster.HeadAddr())
+		cluster.refreshClusterState()
 		return fmt.Errorf("error getting subscription node: %v", err)
 	}
 
@@ -354,7 +590,6 @@ func (c *SubscribeCmd) Run(ctx *kong.Context) error {
 			return fmt.Errorf("error receiving: %v", err)
 		}
 
-		// Izpis
 		opType := "UNKNOWN"
 		switch event.Op {
 		case pb.OpType_OP_POST:

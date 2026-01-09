@@ -749,11 +749,18 @@ func (s *MessageBoardServer) SubscribeTopic(req *rpb.SubscribeTopicRequest, stre
 		return status.Error(codes.PermissionDenied, "Invalid subscription.")
 	}
 	defer s.rmSubscription(user_id)
-	sub.ch = make(chan MessageEv)
 
 	if !slices.Equal(sub.topics, req.TopicId) {
 		return status.Error(codes.PermissionDenied, "Topic sets differ.")
 	}
+
+	// v.ch je bil vedno nil
+	sub.ch = make(chan MessageEv)
+	func() {
+		s.subs_mtx.Lock()
+		defer s.subs_mtx.Unlock()
+		s.subs[user_id] = sub
+	}()
 	for _, topic_id := range req.TopicId {
 		for msg_id, msg := range s.topics[topic_id].messages {
 			stream.Send(&rpb.MessageEvent{

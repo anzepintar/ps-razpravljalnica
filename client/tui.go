@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -18,11 +19,10 @@ import (
 )
 
 type TUI struct {
-	app           *tview.Application
-	pages         *tview.Pages
-	client        pb.MessageBoardClient
-	conn          *grpc.ClientConn
-	serverAddress string
+	app        *tview.Application
+	pages      *tview.Pages
+	cluster    *ClusterClient
+	entryPoint string
 
 	currentUserID   int64
 	currentUserName string
@@ -40,20 +40,20 @@ type TUI struct {
 	subCancel context.CancelFunc
 }
 
-func RunTUI(serverAddress string) error {
+func RunTUI(entryPoint string) error {
 	tui := &TUI{
-		app:           tview.NewApplication(),
-		serverAddress: serverAddress,
+		app:        tview.NewApplication(),
+		entryPoint: entryPoint,
 	}
 
-	// Povezva na strežnik
-	conn, err := grpc.NewClient(serverAddress,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	tui.app.EnableMouse(true)
+
+	// Poveče se na cluster prek entry
+	cluster, err := NewClusterClient(entryPoint)
 	if err != nil {
-		return fmt.Errorf("connection to server %s failed: %v", serverAddress, err)
+		return fmt.Errorf("connection to cluster via %s failed: %v", entryPoint, err)
 	}
-	tui.conn = conn
-	tui.client = pb.NewMessageBoardClient(conn)
+	tui.cluster = cluster
 
 	tui.setupUI()
 
@@ -64,10 +64,11 @@ func RunTUI(serverAddress string) error {
 
 func (t *TUI) setupUI() {
 	t.pages = tview.NewPages()
+	t.pages.SetBackgroundColor(tcell.ColorBlack)
 
 	t.statusBar = tview.NewTextView().
 		SetDynamicColors(true).
-		SetText("[yellow]Not logged in[white] | Server: " + t.serverAddress)
+		SetText("[yellow]Not logged in[white] | Entry: " + t.entryPoint)
 	t.statusBar.SetBackgroundColor(tcell.ColorDarkBlue)
 
 	t.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
@@ -84,9 +85,17 @@ func (t *TUI) cleanup() {
 	if t.subCancel != nil {
 		t.subCancel()
 	}
-	if t.conn != nil {
-		t.conn.Close()
+	if t.cluster != nil {
+		t.cluster.Close()
 	}
+}
+
+func (t *TUI) writeClient() pb.MessageBoardClient {
+	return t.cluster.WriteClient()
+}
+
+func (t *TUI) readClient() pb.MessageBoardClient {
+	return t.cluster.ReadClient()
 }
 
 func (t *TUI) showLoginScreen() {
@@ -111,8 +120,15 @@ func (t *TUI) showLoginScreen() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		user, err := t.client.CreateUser(ctx, &pb.CreateUserRequest{Name: username})
+		client := t.writeClient()
+		if client == nil {
+			t.showError("No head node available")
+			return
+		}
+		user, err := client.CreateUser(ctx, &pb.CreateUserRequest{Name: username})
 		if err != nil {
+			t.cluster.snitch(t.cluster.HeadAddr())
+			t.cluster.refreshClusterState()
 			t.showError(fmt.Sprintf("Failed to create user: %v", err))
 			return
 		}
@@ -135,8 +151,16 @@ func (t *TUI) showLoginScreen() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		user, err := t.client.GetUser(ctx, &pb.GetUserRequest{UserId: id})
+		// bere iz repa
+		client := t.readClient()
+		if client == nil {
+			t.showError("No tail node available")
+			return
+		}
+		user, err := client.GetUser(ctx, &pb.GetUserRequest{UserId: id})
 		if err != nil {
+			t.cluster.snitch(t.cluster.TailAddr())
+			t.cluster.refreshClusterState()
 			t.showError(fmt.Sprintf("User not found: %v", err))
 			return
 		}
@@ -170,6 +194,7 @@ func (t *TUI) showMainScreen() {
 	t.topicsList = tview.NewList().
 		ShowSecondaryText(false)
 	t.topicsList.SetBorder(true).SetTitle(" Topics (t: new, r: refresh) ")
+	t.topicsList.SetBackgroundColor(tcell.ColorBlack)
 
 	t.topicsList.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
 		if index < len(t.topics) {
@@ -185,6 +210,8 @@ func (t *TUI) showMainScreen() {
 		SetScrollable(true).
 		SetWordWrap(true)
 	t.messagesList.SetBorder(true).SetTitle(" Messages ")
+	t.messagesList.SetBackgroundColor(tcell.ColorBlack)
+	t.messagesList.ScrollToEnd()
 
 	// Vnos na dnu
 	t.inputField = tview.NewInputField().
@@ -196,6 +223,7 @@ func (t *TUI) showMainScreen() {
 		}
 	})
 	t.inputField.SetBorder(true).SetTitle(" Post Message (Enter to send) ")
+	t.inputField.SetBackgroundColor(tcell.ColorBlack)
 
 	helpText := tview.NewTextView().
 		SetDynamicColors(true).
@@ -217,7 +245,7 @@ func (t *TUI) showMainScreen() {
 	t.topicsList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyTab:
-			t.app.SetFocus(t.inputField)
+			t.setFocusPanel(t.inputField)
 			return nil
 		case tcell.KeyRune:
 			switch event.Rune() {
@@ -239,10 +267,10 @@ func (t *TUI) showMainScreen() {
 	t.inputField.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyTab:
-			t.app.SetFocus(t.messagesList)
+			t.setFocusPanel(t.messagesList)
 			return nil
 		case tcell.KeyEscape:
-			t.app.SetFocus(t.topicsList)
+			t.setFocusPanel(t.topicsList)
 			return nil
 		}
 		return event
@@ -251,7 +279,7 @@ func (t *TUI) showMainScreen() {
 	t.messagesList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyTab:
-			t.app.SetFocus(t.topicsList)
+			t.setFocusPanel(t.topicsList)
 			return nil
 		case tcell.KeyRune:
 			switch event.Rune() {
@@ -280,19 +308,49 @@ func (t *TUI) showMainScreen() {
 	t.pages.SwitchToPage("main")
 
 	t.loadTopics()
+
+	// naloženo na začetku, če kaj že obstaja
+	if len(t.topics) > 0 {
+		t.currentTopicID = t.topics[0].Id
+		t.loadMessages()
+		t.startSubscription()
+	}
+
+	t.setFocusPanel(t.topicsList)
+}
+
+func (t *TUI) setFocusPanel(p tview.Primitive) {
+	t.topicsList.SetBorderColor(tcell.ColorWhite)
+	t.messagesList.SetBorderColor(tcell.ColorWhite)
+	t.inputField.SetBorderColor(tcell.ColorWhite)
+
+	if box, ok := p.(interface{ SetBorderColor(tcell.Color) *tview.Box }); ok {
+		box.SetBorderColor(tcell.ColorOrange)
+	}
+	t.app.SetFocus(p)
 }
 
 func (t *TUI) updateStatusBar() {
-	t.statusBar.SetText(fmt.Sprintf("[green]User: %s (ID: %d)[white] | Server: %s | Topic: %d",
-		t.currentUserName, t.currentUserID, t.serverAddress, t.currentTopicID))
+	headAddr := t.cluster.HeadAddr()
+	tailAddr := t.cluster.TailAddr()
+	t.statusBar.SetText(fmt.Sprintf("[green]User: %s (ID: %d)[white] | Head: %s | Tail: %s | Topic: %d",
+		t.currentUserName, t.currentUserID, headAddr, tailAddr, t.currentTopicID))
 }
 
 func (t *TUI) loadTopics() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	resp, err := t.client.ListTopics(ctx, &emptypb.Empty{})
+	client := t.readClient()
+	if client == nil {
+		t.showError("No tail node available")
+		return
+	}
+
+	resp, err := client.ListTopics(ctx, &emptypb.Empty{})
 	if err != nil {
+		t.cluster.snitch(t.cluster.TailAddr())
+		t.cluster.refreshClusterState()
 		t.showError(fmt.Sprintf("Failed to load topics: %v", err))
 		return
 	}
@@ -312,17 +370,29 @@ func (t *TUI) loadMessages() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	resp, err := t.client.GetMessages(ctx, &pb.GetMessagesRequest{
+	client := t.readClient()
+	if client == nil {
+		t.showError("No tail node available")
+		return
+	}
+
+	resp, err := client.GetMessages(ctx, &pb.GetMessagesRequest{
 		TopicId:       t.currentTopicID,
 		FromMessageId: 0,
 		Limit:         100,
 	})
 	if err != nil {
+		t.cluster.snitch(t.cluster.TailAddr())
+		t.cluster.refreshClusterState()
 		t.showError(fmt.Sprintf("Failed to load messages: %v", err))
 		return
 	}
 
 	t.messages = resp.Messages
+	// sporočila urejena po id
+	slices.SortFunc(t.messages, func(a, b *pb.Message) int {
+		return int(a.Id - b.Id)
+	})
 	t.renderMessages()
 	t.updateStatusBar()
 }
@@ -332,14 +402,16 @@ func (t *TUI) renderMessages() {
 	var sb strings.Builder
 
 	for _, msg := range t.messages {
-		// Get username
 		userName := fmt.Sprintf("User#%d", msg.UserId)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		user, err := t.client.GetUser(ctx, &pb.GetUserRequest{UserId: msg.UserId})
-		cancel()
-		if err == nil {
-			userName = user.Name
+		client := t.readClient()
+		if client != nil {
+			user, err := client.GetUser(ctx, &pb.GetUserRequest{UserId: msg.UserId})
+			if err == nil {
+				userName = user.Name
+			}
 		}
+		cancel()
 
 		timeStr := ""
 		if msg.CreatedAt != nil {
@@ -365,12 +437,20 @@ func (t *TUI) sendMessage() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := t.client.PostMessage(ctx, &pb.PostMessageRequest{
+	client := t.writeClient()
+	if client == nil {
+		t.showError("No head node available")
+		return
+	}
+
+	_, err := client.PostMessage(ctx, &pb.PostMessageRequest{
 		TopicId: t.currentTopicID,
 		UserId:  t.currentUserID,
 		Text:    text,
 	})
 	if err != nil {
+		t.cluster.snitch(t.cluster.HeadAddr())
+		t.cluster.refreshClusterState()
 		t.showError(fmt.Sprintf("Failed to send message: %v", err))
 		return
 	}
@@ -381,6 +461,7 @@ func (t *TUI) sendMessage() {
 
 func (t *TUI) showNewTopicDialog() {
 	form := tview.NewForm()
+	form.SetBackgroundColor(tcell.ColorBlack)
 	var topicName string
 
 	form.AddInputField("Topic Name", "", 40, nil, func(text string) {
@@ -393,9 +474,17 @@ func (t *TUI) showNewTopicDialog() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		_, err := t.client.CreateTopic(ctx, &pb.CreateTopicRequest{Name: topicName})
+		client := t.writeClient()
+		if client == nil {
+			t.showError("No head node available")
+			return
+		}
+
+		_, err := client.CreateTopic(ctx, &pb.CreateTopicRequest{Name: topicName})
 		if err != nil {
-			t.showError(fmt.Sprintf("Failed to cretae topic: %v", err))
+			t.cluster.snitch(t.cluster.HeadAddr())
+			t.cluster.refreshClusterState()
+			t.showError(fmt.Sprintf("Failed to create topic: %v", err))
 			return
 		}
 		t.pages.RemovePage("newtopic")
@@ -436,12 +525,20 @@ func (t *TUI) showLikeDialog() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		_, err := t.client.LikeMessage(ctx, &pb.LikeMessageRequest{
+		client := t.writeClient()
+		if client == nil {
+			t.showError("No head node available")
+			return
+		}
+
+		_, err := client.LikeMessage(ctx, &pb.LikeMessageRequest{
 			TopicId:   t.currentTopicID,
 			MessageId: msgID,
 			UserId:    t.currentUserID,
 		})
 		if err != nil {
+			t.cluster.snitch(t.cluster.HeadAddr())
+			t.cluster.refreshClusterState()
 			t.showError(fmt.Sprintf("Failed to like message: %v", err))
 			return
 		}
@@ -483,12 +580,20 @@ func (t *TUI) showDeleteDialog() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		_, err := t.client.DeleteMessage(ctx, &pb.DeleteMessageRequest{
+		client := t.writeClient()
+		if client == nil {
+			t.showError("No head node available")
+			return
+		}
+
+		_, err := client.DeleteMessage(ctx, &pb.DeleteMessageRequest{
 			TopicId:   t.currentTopicID,
 			MessageId: msgID,
 			UserId:    t.currentUserID,
 		})
 		if err != nil {
+			t.cluster.snitch(t.cluster.HeadAddr())
+			t.cluster.refreshClusterState()
 			t.showError(fmt.Sprintf("Failed to delete message: %v", err))
 			return
 		}
@@ -522,7 +627,7 @@ func (t *TUI) showEditDialog() {
 	}, func(text string) {
 		msgIDStr = text
 	})
-	form.AddInputField("New text", "", 50, nil, func(text string) {
+	form.AddInputField("New text", "", 45, nil, func(text string) {
 		newText = text
 	})
 	form.AddButton("Update", func() {
@@ -534,13 +639,21 @@ func (t *TUI) showEditDialog() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		_, err := t.client.UpdateMessage(ctx, &pb.UpdateMessageRequest{
+		client := t.writeClient()
+		if client == nil {
+			t.showError("No head node available")
+			return
+		}
+
+		_, err := client.UpdateMessage(ctx, &pb.UpdateMessageRequest{
 			TopicId:   t.currentTopicID,
 			MessageId: msgID,
 			UserId:    t.currentUserID,
 			Text:      newText,
 		})
 		if err != nil {
+			t.cluster.snitch(t.cluster.HeadAddr())
+			t.cluster.refreshClusterState()
 			t.showError(fmt.Sprintf("Failed to update message: %v", err))
 			return
 		}
@@ -585,14 +698,21 @@ func (t *TUI) startSubscription() {
 		return
 	}
 
+	client := t.writeClient() // GetSubscriptionNode čez nodes
+	if client == nil {
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	subNodeResp, err := t.client.GetSubscriptionNode(ctx, &pb.SubscriptionNodeRequest{
+	subNodeResp, err := client.GetSubscriptionNode(ctx, &pb.SubscriptionNodeRequest{
 		UserId:  t.currentUserID,
 		TopicId: []int64{t.currentTopicID},
 	})
 	cancel()
 
 	if err != nil {
+		t.cluster.snitch(t.cluster.HeadAddr())
+		t.cluster.refreshClusterState()
 		return
 	}
 

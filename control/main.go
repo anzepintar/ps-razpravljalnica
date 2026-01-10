@@ -44,6 +44,7 @@ type RunControlCmd struct {
 	RaftID        string   `arg:"" help:"ID used by raft protocol"`
 	OtherMembers  []string `arg:"" optional:"" help:"other control server addresses"`
 	BootstrapRaft bool     `help:"Whether to bootstrap the Raft cluster"`
+	Tui           bool     `short:"t" help:"enable tui"`
 }
 
 var cntsrv = ControlPlaneServer{}
@@ -53,7 +54,7 @@ func statePrinter() {
 		cntsrv.mtx.RLock()
 		log.Printf(".{ .idx = %v, .nodes = %v }\n", cntsrv.Idx, cntsrv.Nodes)
 		cntsrv.mtx.RUnlock()
-		time.Sleep(time.Second)
+		time.Sleep(time.Second * 5)
 	}
 }
 
@@ -83,6 +84,15 @@ func (s *RunControlCmd) Run() error {
 	leaderhealth.Setup(r, srv, []string{""})
 	tm.Register(srv)
 	log.Printf("server listening at %v", lis.Addr())
+	if s.Tui {
+		go func() {
+			if err := srv.Serve(lis); err != nil {
+				log.Printf("failed to serve: %v", err)
+			}
+		}()
+		RunTUI()
+		return nil
+	}
 	if err := srv.Serve(lis); err != nil {
 		return fmt.Errorf("failed to serve: %v", err)
 	}

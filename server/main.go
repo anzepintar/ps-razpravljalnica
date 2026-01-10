@@ -2,25 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"math/rand"
 	"net"
 	rpb "server/razpravljalnica"
 	"slices"
-	"strconv"
 	"sync"
-
-	// "github.com/gdamore/tcell/v2"
-	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
+	"sync/atomic"
 
 	"github.com/alecthomas/kong"
-
-	"encoding/base64"
-	"time"
-
-	"sync/atomic"
 
 	"google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
@@ -31,8 +23,6 @@ import (
 )
 
 var cli RunNodeCmd
-var app *tview.Application
-var view *tview.Frame
 
 func main() {
 	ctx := kong.Parse(&cli)
@@ -57,94 +47,6 @@ func myLog(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grp
 	resp, err = handler(ctx, req)
 	log.Printf("%v(%+v) -> %+v %v", info.FullMethod, req, resp, err)
 	return resp, err
-}
-
-func tuiUpdater() {
-	for {
-		time.Sleep(time.Second)
-		app.QueueUpdateDraw(func() {
-			pages := view.GetPrimitive().(*tview.Pages)
-
-			name, page := pages.GetFrontPage()
-			if name == "users" {
-				table := page.(*tview.Table)
-				table.Clear()
-				msrv.users_mtx.RLock()
-				for id, user := range msrv.users {
-					table.SetCellSimple(id, 0, strconv.Itoa(id))
-					table.SetCellSimple(id, 1, user.name)
-				}
-				msrv.users_mtx.RUnlock()
-			}
-		})
-	}
-}
-
-func pageTitler(pages *tview.Pages) string {
-	out := make([]rune, 0)
-	page_names := pages.GetPageNames(false)
-	selected_name, _ := pages.GetFrontPage()
-	for _, v := range page_names {
-		if selected_name == v {
-			out = append(out, '[')
-			out = slices.Concat(out, []rune(v))
-			out = append(out, ']')
-		} else {
-			out = slices.Concat(out, []rune(v))
-			out = append(out, ' ')
-		}
-	}
-	return string(out)
-}
-func pageT() {
-	pages := view.GetPrimitive().(*tview.Pages)
-	view.Clear()
-	view.AddText(tview.Escape(pageTitler(pages)), true, tview.AlignCenter, tcell.ColorDefault)
-	view.AddText(cntrlldp.self.address, true, tview.AlignLeft, tcell.ColorDefault)
-}
-
-func pageFlipper(event *tcell.EventKey) *tcell.EventKey {
-	if event.Key() == tcell.KeyPgDn {
-		pages := view.GetPrimitive().(*tview.Pages)
-		fp, _ := pages.GetFrontPage()
-		pages.SendToBack(fp)
-		pageT()
-		return nil
-	} else if event.Key() == tcell.KeyPgUp {
-		pages := view.GetPrimitive().(*tview.Pages)
-		ps := pages.GetPageNames(false)
-		pages.SendToFront(ps[len(ps)-1])
-		pageT()
-		return nil
-	}
-	return event
-}
-
-func tui() {
-	app = tview.NewApplication()
-	pages := tview.NewPages()
-	view = tview.NewFrame(pages)
-	pages.AddPage("topics",
-		tview.NewFlex().
-			AddItem(tview.NewDropDown(), 0, 1, true).
-			AddItem(tview.NewTable().SetBorders(true), 0, 1, true).
-			SetBackgroundColor(tcell.ColorNone),
-		true, true)
-	users_table := tview.NewTable().SetBorders(true)
-	users_table.SetBackgroundColor(tcell.ColorNone)
-	pages.AddPage("users", users_table, true, true)
-	pages.SetBackgroundColor(tcell.ColorNone)
-	pages.SetInputCapture(pageFlipper)
-	view.SetBackgroundColor(tcell.ColorNone)
-
-	go tuiUpdater()
-
-	pageT()
-	if err := app.SetRoot(view, true).Run(); err != nil {
-		panic(err)
-	}
-	cntrlldp.should_stop.Store(true)
-	close(cntrlldp.stop_chan)
 }
 
 func (s *RunNodeCmd) Run() error {
@@ -176,7 +78,7 @@ func (s *RunNodeCmd) Run() error {
 		log.Printf("server listening at %v", lis.Addr())
 
 		if s.Tui {
-			go tui()
+			go RunTUI()
 		}
 		if err := srv.Serve(lis); err != nil {
 			return fmt.Errorf("failed to serve: %v", err)

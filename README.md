@@ -49,6 +49,13 @@ Za cluster z več nodi (3-node cluster):
 ./out/control localhost:6002 node3 localhost:6000 localhost:6001
 ```
 
+Argumenti:
+- Prvi argument: naslov na katerem control node posluša
+- Drugi argument: Raft ID
+- Ostali argumenti: naslovi drugih control nodov
+- `--bootstrap-raft`: inicializira Raft cluster (samo za prvi node)
+- `-t`: omogoči TUI vmesnik
+
 ### 2. Data plane strežniki (Chain replication)
 
 Zaženemo enega ali več strežnikov. Vsak strežnik se registrira pri kontrolni ravnini:
@@ -65,23 +72,27 @@ Zaženemo enega ali več strežnikov. Vsak strežnik se registrira pri kontrolni
 Argumenti:
 - Prvi argument: naslov kontrolne ravnine (entry point)
 - `-b`: naslov na katerem strežnik posluša
+- `-t`: omogoči TUI vmesnik
 
 ### 3. Odjemalec
 
 Odjemalec se poveže na kontrolno ravnino (entry point) in od tam dobi naslove Head/Tail strežnikov.
 
-**CLI**
+**CLI:**
 ```bash
 # Pomoč
-./out/client cli --help
+./out/client --help
 
 # Z drugačnim entry pointom
-./out/client --entry localhost:6000 cli create-user "Janez"
+./out/client --entry localhost:6000 create-user "Janez"
 ```
 
 **TUI:**
 ```bash
-./out/client
+./out/client -t
+
+# Z drugačnim entry pointom
+./out/client -e localhost:6000 -t
 ```
 
 ## Delovanje
@@ -90,23 +101,56 @@ Odjemalec se poveže na kontrolno ravnino (entry point) in od tam dobi naslove H
 - **Reads** (ListTopics, GetMessages, GetUser) → TAIL
 - Če karkoli faila → client snitcha kontrolni ravnini
 
+## TUI vmesniki
+
+Vsi trije komponenti (client, server, control) imajo TUI vmesnik, ki se zažene z `-t` flagom.
+
+### Client TUI
+```bash
+./out/client -t
+```
+- **Login screen**: Ustvari novega uporabnika ali se prijavi z obstoječim ID
+- **Topics panel**: Seznam tem, navigacija z puščicami
+- **Messages panel**: Sporočila v trenutni temi
+- **Input field**: Pisanje novih sporočil
+- **Tipke**: `Tab` = preklop panelov, `t` = nova tema, `r` = osveži, `l` = like, `d` = delete, `e` = edit, `q` = izhod
+
+### Server TUI
+```bash
+./out/server localhost:6000 -b localhost:5000 -t
+```
+- **Users table**: Seznam registriranih uporabnikov (ID, ime)
+- **Topics table**: Seznam tem (ID, ime, število sporočil)
+- **Chain info**: Informacije o chain replication (self, prev, next, control plane)
+- **Logs panel**: Logi strežnika
+- **Tipke**: `Tab` = preklop panelov, `q` = izhod
+
+### Control TUI
+```bash
+./out/control localhost:6000 node1 --bootstrap-raft -t
+```
+- **Nodes table**: Seznam data plane nodov v chain (pozicija, ID, naslov, vloga HEAD/TAIL)
+- **Raft info**: Informacije o Raft clustru (state, leader, term, log index, seznam serverjev)
+- **Logs panel**: Logi kontrolne ravnine
+- **Tipke**: `Tab` = preklop panelov, `q` = izhod
+
 ## Testiranje subscriptions
 
 **Naročnik:**
 ```bash
-./out/client cli create-user --name "test"
-./out/client cli create-topic --name "testna tema"
+./out/client create-user "test"
+./out/client create-topic "testna tema"
 
-./out/client cli subscribe --user-id 0 --topic-ids 0
+./out/client subscribe --user-id 0 --topic-ids 0
 ```
 
 **Pošiljatelj:**
 ```bash
-./out/client cli post-message --user-id 0 --topic-id 0 --text "sporocilotest1"
+./out/client post --user-id 0 --topic-id 0 "sporocilotest1"
 
-./out/client cli like-message --user-id 0 --topic-id 0 --message-id 0
+./out/client like --user-id 0 --topic-id 0 --message-id 0
 
-./out/client cli update-message --user-id 0 --topic-id 0 --message-id 0 --text "sporocilotest2"
+./out/client update --user-id 0 --topic-id 0 --message-id 0 "sporocilotest2"
 
-./out/client cli delete-message --user-id 0 --topic-id 0 --message-id 0
+./out/client delete --user-id 0 --topic-id 0 --message-id 0
 ```

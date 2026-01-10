@@ -25,11 +25,8 @@ import (
 var CLI struct {
 	EntryPoint string        `help:"Entry point address (control plane node)" default:"localhost:6000" name:"entry" short:"e"`
 	Timeout    time.Duration `help:"Request timeout" default:"5s" name:"timeout"`
-	Cli        CliCmds       `cmd:"" help:"Command-line client operations"`
-}
+	Tui        bool          `short:"t" help:"Enable TUI mode"`
 
-// CLI skupine ukazov
-type CliCmds struct {
 	CreateUser  CreateUserCmd  `cmd:"create-user" help:"Create a new user"`
 	CreateTopic CreateTopicCmd `cmd:"create-topic" help:"Create a new topic"`
 	PostMessage PostMessageCmd `cmd:"post" help:"Post a message to a topic"`
@@ -38,7 +35,7 @@ type CliCmds struct {
 	Like        LikeMsgCmd     `cmd:"like" help:"Like a message"`
 	ListTopics  ListTopicsCmd  `cmd:"list-topics" help:"List topics"`
 	GetMessages GetMessagesCmd `cmd:"get-messages" help:"Get messages for a topic"`
-	Subscribe   SubscribeCmd   `cmd:"subscribe" help:"Subscribe to topics (streaming - todo)"`
+	Subscribe   SubscribeCmd   `cmd:"subscribe" help:"Subscribe to topics (streaming)"`
 }
 
 // Definicije ukazov
@@ -91,18 +88,31 @@ type SubscribeCmd struct {
 }
 
 func main() {
-	if len(os.Args) == 1 {
-		// TUI
-		if err := RunTUI("localhost:6000"); err != nil {
-			fmt.Printf("TUI Error: %v\n", err)
-			os.Exit(1)
+	// Check for -t flag before kong parsing to allow TUI without command
+	for _, arg := range os.Args[1:] {
+		if arg == "-t" || arg == "--tui" {
+			entryPoint := "localhost:6000"
+			// Check for -e flag
+			for i, a := range os.Args[1:] {
+				if (a == "-e" || a == "--entry") && i+2 < len(os.Args) {
+					entryPoint = os.Args[i+2]
+				} else if len(a) > 3 && a[:3] == "-e=" {
+					entryPoint = a[3:]
+				} else if len(a) > 8 && a[:8] == "--entry=" {
+					entryPoint = a[8:]
+				}
+			}
+			if err := RunTUI(entryPoint); err != nil {
+				fmt.Printf("TUI Error: %v\n", err)
+				os.Exit(1)
+			}
+			os.Exit(0)
 		}
-		os.Exit(0)
 	}
 
 	ctx := kong.Parse(&CLI,
 		kong.Name("client"),
-		kong.Description("Razpravljalnica CLI - use 'client cli <command>' for commands"),
+		kong.Description("Razpravljalnica CLI - use -t for TUI mode"),
 		kong.UsageOnError(),
 	)
 

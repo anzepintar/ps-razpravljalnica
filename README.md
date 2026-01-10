@@ -17,6 +17,24 @@ go build -C client -o ../out/client .
 go build -C control -o ../out/control .
 ```
 
+## Testiranje
+
+```bash
+# Vsi unit testi v projektu
+cd client && go test -v && cd ..
+cd server && go test -v && cd ..
+cd control && go test -v && cd ..
+
+# Fuzz testi za client
+go test -fuzz=FuzzParseTopicIDs -fuzztime=30s ./client
+
+# Fuzz testi za server
+go test -fuzz=FuzzValidateUserName -fuzztime=30s ./server
+
+# Fuzz testi za control
+go test -fuzz=FuzzValidateNodeAddress -fuzztime=30s ./control
+```
+
 ## Zagon
 
 ### 1. Kontrolna ravnina (Raft cluster)

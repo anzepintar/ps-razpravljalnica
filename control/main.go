@@ -323,11 +323,12 @@ func (s *ControlPlaneServer) Apply(l *raft.Log) any {
 
 		id := s.Idx
 		s.Idx++
-		s.Nodes = append(s.Nodes, Node{id: id, address: addr})
+		new_node := Node{id: id, address: addr}
+		s.Nodes = append(s.Nodes, new_node)
 		if len(s.Nodes) > 1 {
 			go s.sendUpdate(s.Nodes[len(s.Nodes)-2].id)
 		}
-		return s.Nodes[len(s.Nodes)-1]
+		return &new_node
 	} else if op == '-' {
 		id_str := req[1:]
 		id, err := strconv.ParseInt(string(id_str), 10, 10)
@@ -346,8 +347,9 @@ func (s *ControlPlaneServer) Apply(l *raft.Log) any {
 		}
 
 		s.Nodes = slices.Delete(s.Nodes, idx, idx+1)
+		return nil
 	}
-	log.Panicf("unkown apply op %v", op)
+	log.Panicf("unkown apply op %v '%s'", op, req)
 	return nil
 }
 

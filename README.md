@@ -44,11 +44,12 @@ Za cluster z več nodi (3-node cluster):
 
 ```bash
 # bootstrap node
+rm runtime -r
 ./out/control 127.0.0.1:6000 node1 --bootstrap-raft
 
-./out/control 127.0.0.1:6001 node2 127.0.0.1:6000
+./out/control 127.0.0.1:6001 node2
 
-./out/control 127.0.0.1:6002 node3 127.0.0.1:6000 127.0.0.1:6001
+./out/control 127.0.0.1:6002 node3
 
 go install github.com/Jille/raftadmin/cmd/raftadmin@latest
 
@@ -125,3 +126,4 @@ TODO:
 
 - če odstraniš raft leaderja, ali potem kdo drug postane leader - trenutno se mi zdi, da ostane isti raft leader (prevote denied, kljub temu, da leader ne obstaja več)?
 - primeri uporabe
+- dodaj dober logging v clienta

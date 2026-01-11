@@ -49,17 +49,26 @@ type RunControlCmd struct {
 var cntsrv = ControlPlaneServer{}
 
 func statePrinter() {
+	if cli.Tui {
+		return
+	}
 	for {
-		cntsrv.mtx.RLock()
-		log.Printf(".{ .idx = %v, .nodes = %v }\n", cntsrv.Idx, cntsrv.Nodes)
-		cntsrv.mtx.RUnlock()
 		time.Sleep(time.Second * 5)
+		cntsrv.mtx.RLock()
+		log.Printf(".{ .idx = %v, .nodes = %v, .config = %v }\n",
+			cntsrv.Idx,
+			cntsrv.Nodes,
+			cntsrv.raft.GetConfiguration().Configuration().Servers,
+		)
+		cntsrv.mtx.RUnlock()
 	}
 }
 
 func myLog(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
 	resp, err = handler(ctx, req)
-	log.Printf("%v(%+v) -> %+v %v", info.FullMethod, req, resp, err)
+	if !cli.Tui {
+		log.Printf("%v(%+v) -> %+v %v", info.FullMethod, req, resp, err)
+	}
 	return resp, err
 }
 
@@ -100,6 +109,9 @@ func (s *RunControlCmd) Run() error {
 
 func NewRaft(ctx context.Context, myID, myAddress string, fsm raft.FSM) (*raft.Raft, *transport.Manager, error) {
 	c := raft.DefaultConfig()
+	if cli.Tui {
+		c.LogLevel = "Off"
+	}
 	c.LocalID = raft.ServerID(myID)
 
 	raftDir := "runtime"
@@ -132,6 +144,7 @@ func NewRaft(ctx context.Context, myID, myAddress string, fsm raft.FSM) (*raft.R
 
 	if cli.BootstrapRaft {
 		cfg := raft.Configuration{
+
 			Servers: []raft.Server{
 				{
 					Suffrage: raft.Voter,

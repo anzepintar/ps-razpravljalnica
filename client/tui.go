@@ -28,18 +28,33 @@ type TUI struct {
 	currentUserName string
 
 	// Elementi prikaza
-	statusBar    *tview.TextView
-	logView      *tview.TextView
-	topicsList   *tview.List
-	messagesList *tview.TextView
-	inputField   *tview.InputField
+	statusBar        *tview.TextView
+	logView          *tview.TextView
+	topicsList       *tview.List
+	subscriptionList *tview.List
+	messagesList     *tview.TextView
+	inputField       *tview.InputField
 
 	topics         []*pb.Topic
 	currentTopicID int64
 	messages       []*pb.Message
 
+	// Naročnine na več tem
+	subscriptions       []Subscription
+	currentSubIndex     int  // -1 pomeni, da ni izbrana nobena naročnina
+	viewingSubscription bool // ali gledamo naročnino ali navadno temo
+	subMessages         []*pb.Message
+
 	subCancel          context.CancelFunc
 	stateRefreshCancel context.CancelFunc
+}
+
+// Subscription predstavlja naročnino na več tem
+type Subscription struct {
+	Name     string
+	TopicIDs []int64
+	Messages []*pb.Message
+	Cancel   context.CancelFunc
 }
 
 // tuiInstance is used for logging to TUI
@@ -50,8 +65,10 @@ func RunTUI(entryPoint string) error {
 	tuiMode = true
 
 	tui := &TUI{
-		app:        tview.NewApplication(),
-		entryPoint: entryPoint,
+		app:             tview.NewApplication(),
+		entryPoint:      entryPoint,
+		currentSubIndex: -1,
+		subscriptions:   []Subscription{},
 	}
 	tuiInstance = tui
 
@@ -112,6 +129,12 @@ func (t *TUI) setupUI() {
 func (t *TUI) cleanup() {
 	if t.subCancel != nil {
 		t.subCancel()
+	}
+	// Prekliči vse naročnine na več tem
+	for _, sub := range t.subscriptions {
+		if sub.Cancel != nil {
+			sub.Cancel()
+		}
 	}
 	if t.stateRefreshCancel != nil {
 		t.stateRefreshCancel()
@@ -219,7 +242,7 @@ func (t *TUI) safeReadOp(opName string, op func(client pb.MessageBoardClient) er
 func (t *TUI) tuiLog(format string, args ...any) {
 	if t.logView != nil && t.app != nil {
 		msg := fmt.Sprintf(format, args...)
-		t.app.QueueUpdateDraw(func() {
+		go t.app.QueueUpdateDraw(func() {
 			timestamp := time.Now().Format("15:04:05")
 			fmt.Fprintf(t.logView, "[dim]%s[white] %s\n", timestamp, msg)
 			t.logView.ScrollToEnd()
@@ -319,6 +342,9 @@ func (t *TUI) showLoginScreen() {
 }
 
 func (t *TUI) showMainScreen() {
+	t.currentSubIndex = -1
+	t.viewingSubscription = false
+
 	// Teme na levi
 	t.topicsList = tview.NewList().
 		ShowSecondaryText(false)
@@ -327,9 +353,26 @@ func (t *TUI) showMainScreen() {
 
 	t.topicsList.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
 		if index < len(t.topics) {
+			t.viewingSubscription = false
+			t.currentSubIndex = -1
 			t.currentTopicID = t.topics[index].Id
+			t.messagesList.SetTitle(fmt.Sprintf(" Messages - %s ", t.topics[index].Name))
 			t.loadMessages()
 			t.startSubscription()
+		}
+	})
+
+	// Seznam naročnin pod temami
+	t.subscriptionList = tview.NewList().
+		ShowSecondaryText(false)
+	t.subscriptionList.SetBorder(true).SetTitle(" Subscriptions (n: new) ")
+	t.subscriptionList.SetBackgroundColor(tcell.ColorBlack)
+
+	t.subscriptionList.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
+		if index < len(t.subscriptions) {
+			t.viewingSubscription = true
+			t.currentSubIndex = index
+			t.renderSubscriptionMessages()
 		}
 	})
 
@@ -356,12 +399,17 @@ func (t *TUI) showMainScreen() {
 
 	helpText := tview.NewTextView().
 		SetDynamicColors(true).
-		SetText("[yellow]Keys:[white] Tab=switch | t=new topic | r=refresh | l=like | d=delete | e=edit | s=servers | q=quit")
+		SetText("[yellow]Keys:[white] Tab=switch | t=new topic | n=new subscription | r=refresh | l=like | d=delete | e=edit | s=servers | q=quit")
 	helpText.SetBackgroundColor(tcell.ColorDarkGreen)
+
+	// Leva stran: teme in naročnine
+	leftPanel := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(t.topicsList, 0, 2, true).
+		AddItem(t.subscriptionList, 0, 1, false)
 
 	// razporeditev
 	mainFlex := tview.NewFlex().
-		AddItem(t.topicsList, 30, 1, true).
+		AddItem(leftPanel, 30, 1, true).
 		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
 			AddItem(t.messagesList, 0, 1, false).
 			AddItem(t.inputField, 3, 0, false), 0, 3, false)
@@ -375,15 +423,43 @@ func (t *TUI) showMainScreen() {
 	t.topicsList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyTab:
-			t.setFocusPanel(t.inputField)
+			t.setFocusPanel(t.subscriptionList)
 			return nil
 		case tcell.KeyRune:
 			switch event.Rune() {
 			case 't':
 				t.showNewTopicDialog()
 				return nil
+			case 'n':
+				t.showNewSubscriptionDialog()
+				return nil
 			case 'r':
 				t.loadTopics()
+				return nil
+			case 's':
+				t.showServersDialog()
+				return nil
+			case 'q':
+				t.cleanup()
+				t.app.Stop()
+				return nil
+			}
+		}
+		return event
+	})
+
+	t.subscriptionList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyTab:
+			t.setFocusPanel(t.inputField)
+			return nil
+		case tcell.KeyRune:
+			switch event.Rune() {
+			case 'n':
+				t.showNewSubscriptionDialog()
+				return nil
+			case 'x':
+				t.removeCurrentSubscription()
 				return nil
 			case 's':
 				t.showServersDialog()
@@ -460,6 +536,7 @@ func (t *TUI) showMainScreen() {
 
 func (t *TUI) setFocusPanel(p tview.Primitive) {
 	t.topicsList.SetBorderColor(tcell.ColorWhite)
+	t.subscriptionList.SetBorderColor(tcell.ColorWhite)
 	t.messagesList.SetBorderColor(tcell.ColorWhite)
 	t.inputField.SetBorderColor(tcell.ColorWhite)
 
@@ -980,6 +1057,316 @@ func (t *TUI) startSubscription() {
 				// Log event to log view instead of status bar
 				timestamp := time.Now().Format("15:04:05")
 				fmt.Fprintf(t.logView, "[dim]%s[white] [cyan]Event:[white] %s on msg #%d\n", timestamp, opName, event.Message.Id)
+				t.logView.ScrollToEnd()
+			})
+		}
+	}()
+}
+
+// showNewSubscriptionDialog prikaže dialog za ustvarjanje nove naročnine
+func (t *TUI) showNewSubscriptionDialog() {
+	form := tview.NewForm()
+	form.SetBackgroundColor(tcell.ColorDarkBlue)
+
+	var topicIDsInput string
+
+	form.AddInputField("Topic IDs (comma separated):", "", 40, nil, func(text string) {
+		topicIDsInput = text
+	})
+
+	form.AddButton("Create", func() {
+		if topicIDsInput == "" {
+			t.showError("Topic IDs cannot be empty")
+			return
+		}
+
+		topicIDs, err := parseTopicIDs(topicIDsInput)
+		if err != nil {
+			t.showError(fmt.Sprintf("Invalid topic IDs: %v", err))
+			return
+		}
+
+		if len(topicIDs) == 0 {
+			t.showError("At least one topic ID is required")
+			return
+		}
+
+		t.createSubscription(topicIDs)
+		t.pages.RemovePage("newSubscription")
+	})
+
+	form.AddButton("Cancel", func() {
+		t.pages.RemovePage("newSubscription")
+	})
+
+	form.SetBorder(true).SetTitle(" New Subscription ").SetTitleAlign(tview.AlignCenter)
+
+	flex := tview.NewFlex().
+		AddItem(nil, 0, 1, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(nil, 0, 1, false).
+			AddItem(form, 10, 1, true).
+			AddItem(nil, 0, 1, false), 60, 1, true).
+		AddItem(nil, 0, 1, false)
+
+	t.pages.AddPage("newSubscription", flex, true, true)
+	t.app.SetFocus(form)
+}
+
+// parseTopicIDs pretvori string z vejicami ločenimi ID-ji v seznam int64
+func parseTopicIDs(input string) ([]int64, error) {
+	parts := strings.Split(input, ",")
+	var ids []int64
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(part, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid ID '%s': %v", part, err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// createSubscription ustvari novo naročnino na več tem
+func (t *TUI) createSubscription(topicIDs []int64) {
+	// Ustvari ime naročnine
+	var topicNames []string
+	for _, id := range topicIDs {
+		for _, topic := range t.topics {
+			if topic.Id == id {
+				topicNames = append(topicNames, topic.Name)
+				break
+			}
+		}
+	}
+	name := fmt.Sprintf("Sub: %s", strings.Join(topicNames, ", "))
+	if len(name) > 25 {
+		name = name[:22] + "..."
+	}
+
+	sub := Subscription{
+		Name:     name,
+		TopicIDs: topicIDs,
+		Messages: []*pb.Message{},
+	}
+
+	t.subscriptions = append(t.subscriptions, sub)
+	t.refreshSubscriptionList()
+
+	// Začni naročnino za to skupino tem v ozadju
+	subIndex := len(t.subscriptions) - 1
+	go t.startMultiTopicSubscription(subIndex)
+
+	t.tuiLog("[green]Created subscription for topics: %v", topicIDs)
+}
+
+// refreshSubscriptionList osveži seznam naročnin v UI
+func (t *TUI) refreshSubscriptionList() {
+	t.subscriptionList.Clear()
+	for i, sub := range t.subscriptions {
+		t.subscriptionList.AddItem(fmt.Sprintf("[%d] %s", i+1, sub.Name), "", 0, nil)
+	}
+}
+
+// removeCurrentSubscription odstrani trenutno izbrano naročnino
+func (t *TUI) removeCurrentSubscription() {
+	if t.currentSubIndex < 0 || t.currentSubIndex >= len(t.subscriptions) {
+		return
+	}
+
+	// Prekliči naročnino
+	if t.subscriptions[t.currentSubIndex].Cancel != nil {
+		t.subscriptions[t.currentSubIndex].Cancel()
+	}
+
+	// Odstrani iz seznama
+	t.subscriptions = append(t.subscriptions[:t.currentSubIndex], t.subscriptions[t.currentSubIndex+1:]...)
+	t.currentSubIndex = -1
+	t.viewingSubscription = false
+	t.refreshSubscriptionList()
+
+	// Prikaži prvo temo, če obstaja
+	if len(t.topics) > 0 {
+		t.currentTopicID = t.topics[0].Id
+		t.loadMessages()
+	}
+
+	t.tuiLog("[yellow]Subscription removed")
+}
+
+// renderSubscriptionMessages prikaže sporočila iz naročnine
+func (t *TUI) renderSubscriptionMessages() {
+	if t.currentSubIndex < 0 || t.currentSubIndex >= len(t.subscriptions) {
+		return
+	}
+
+	sub := t.subscriptions[t.currentSubIndex]
+	t.messagesList.SetTitle(fmt.Sprintf(" Messages - %s ", sub.Name))
+
+	t.messagesList.Clear()
+	var sb strings.Builder
+
+	// Sortiraj sporočila po ID
+	messages := make([]*pb.Message, len(sub.Messages))
+	copy(messages, sub.Messages)
+	slices.SortFunc(messages, func(a, b *pb.Message) int {
+		return int(a.Id - b.Id)
+	})
+
+	for _, msg := range messages {
+		userName := fmt.Sprintf("User#%d", msg.UserId)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		client := t.readClient()
+		if client != nil {
+			user, err := client.GetUser(ctx, &pb.GetUserRequest{UserId: msg.UserId})
+			if err == nil {
+				userName = user.Name
+			}
+		}
+		cancel()
+
+		// Poišči ime teme
+		topicName := fmt.Sprintf("Topic#%d", msg.TopicId)
+		for _, topic := range t.topics {
+			if topic.Id == msg.TopicId {
+				topicName = topic.Name
+				break
+			}
+		}
+
+		timeStr := ""
+		if msg.CreatedAt != nil {
+			timeStr = msg.CreatedAt.AsTime().Format("15:04:05")
+		}
+
+		sb.WriteString(fmt.Sprintf("[yellow][%d][white] [magenta][%s][white] [blue]%s[white] [dim](%s)[white]\n",
+			msg.Id, topicName, userName, timeStr))
+		sb.WriteString(fmt.Sprintf("  %s\n", msg.Text))
+		sb.WriteString(fmt.Sprintf("  [red]♥ %d[white]\n\n", msg.Likes))
+	}
+
+	t.messagesList.SetText(sb.String())
+	t.messagesList.ScrollToEnd()
+	t.updateStatusBar()
+}
+
+// startMultiTopicSubscription začne naročnino za več tem
+func (t *TUI) startMultiTopicSubscription(subIndex int) {
+	if subIndex < 0 || subIndex >= len(t.subscriptions) {
+		return
+	}
+
+	sub := &t.subscriptions[subIndex]
+
+	// Pridobi subscription node
+	var subNodeResp *pb.SubscriptionNodeResponse
+	topicIDs := sub.TopicIDs
+	userID := t.currentUserID
+
+	err := t.safeWriteOp("Get subscription node", func(client pb.MessageBoardClient) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		var err error
+		subNodeResp, err = client.GetSubscriptionNode(ctx, &pb.SubscriptionNodeRequest{
+			UserId:  userID,
+			TopicId: topicIDs,
+		})
+		return err
+	})
+
+	if err != nil {
+		t.tuiLog("[red]Multi-topic subscription failed: %v", err)
+		return
+	}
+
+	if subNodeResp == nil || subNodeResp.Node == nil || subNodeResp.Node.Address == "" {
+		t.tuiLog("[red]Multi-topic subscription failed: no valid subscription node")
+		return
+	}
+
+	// Poveži se s subscription node
+	subConn, err := grpc.NewClient(normalizeAddress(subNodeResp.Node.Address),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.tuiLog("[red]Failed to connect to subscription node: %v", err)
+		return
+	}
+
+	subClient := pb.NewMessageBoardClient(subConn)
+
+	subCtx, subCancel := context.WithCancel(context.Background())
+	sub.Cancel = subCancel
+
+	stream, err := subClient.SubscribeTopic(subCtx, &pb.SubscribeTopicRequest{
+		TopicId:        topicIDs,
+		UserId:         userID,
+		FromMessageId:  0,
+		SubscribeToken: subNodeResp.SubscribeToken,
+	})
+	if err != nil {
+		subCancel()
+		subConn.Close()
+		t.tuiLog("[red]Failed to subscribe to topics: %v", err)
+		return
+	}
+
+	t.tuiLog("[green]Started subscription for topics: %v", topicIDs)
+
+	// Poslušaj v ozadju
+	go func() {
+		defer subConn.Close()
+		for {
+			event, err := stream.Recv()
+			if err == io.EOF || err != nil {
+				return
+			}
+
+			t.app.QueueUpdateDraw(func() {
+				// Dodaj sporočilo v naročnino
+				if subIndex < len(t.subscriptions) {
+					// Preveri, ali sporočilo že obstaja, in ga posodobi ali dodaj
+					found := false
+					for i, msg := range t.subscriptions[subIndex].Messages {
+						if msg.Id == event.Message.Id {
+							if event.Op == pb.OpType_OP_DELETE {
+								// Odstrani sporočilo
+								t.subscriptions[subIndex].Messages = append(
+									t.subscriptions[subIndex].Messages[:i],
+									t.subscriptions[subIndex].Messages[i+1:]...)
+							} else {
+								t.subscriptions[subIndex].Messages[i] = event.Message
+							}
+							found = true
+							break
+						}
+					}
+					if !found && event.Op != pb.OpType_OP_DELETE {
+						t.subscriptions[subIndex].Messages = append(t.subscriptions[subIndex].Messages, event.Message)
+					}
+
+					// Če gledamo to naročnino, osveži prikaz
+					if t.viewingSubscription && t.currentSubIndex == subIndex {
+						t.renderSubscriptionMessages()
+					}
+				}
+
+				opName := "UPDATE"
+				switch event.Op {
+				case pb.OpType_OP_POST:
+					opName = "NEW"
+				case pb.OpType_OP_LIKE:
+					opName = "LIKE"
+				case pb.OpType_OP_DELETE:
+					opName = "DELETE"
+				}
+				timestamp := time.Now().Format("15:04:05")
+				fmt.Fprintf(t.logView, "[dim]%s[white] [cyan]Sub Event:[white] %s on msg #%d (topic %d)\n",
+					timestamp, opName, event.Message.Id, event.Message.TopicId)
 				t.logView.ScrollToEnd()
 			})
 		}

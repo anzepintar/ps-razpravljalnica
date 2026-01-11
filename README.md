@@ -40,6 +40,7 @@ go test -fuzz=FuzzValidateNodeAddress -fuzztime=30s ./control
 ### 1. Kontrolna ravnina (Raft cluster)
 
 Za cluster z več nodi (3-node cluster):
+
 ```bash
 # bootstrap node
 ./out/control 127.0.0.1:6000 node1 --bootstrap-raft
@@ -47,6 +48,12 @@ Za cluster z več nodi (3-node cluster):
 ./out/control 127.0.0.1:6001 node2 127.0.0.1:6000
 
 ./out/control 127.0.0.1:6002 node3 127.0.0.1:6000 127.0.0.1:6001
+
+go install github.com/Jille/raftadmin/cmd/raftadmin@latest
+
+raftadmin 127.0.0.1:6000 add_voter node2 127.0.0.1:6001 0
+raftadmin 127.0.0.1:6000 add_voter node3 127.0.0.1:6002 0
+
 ```
 
 Argumenti:
@@ -59,6 +66,7 @@ Argumenti:
 ### 2. Data plane strežniki (Chain replication)
 
 Zaženemo enega ali več strežnikov. Vsak strežnik se registrira pri kontrolni ravnini:
+
 ```bash
 # Head
 ./out/server 127.0.0.1:6000 -b 127.0.0.1:5000
@@ -78,14 +86,7 @@ Argumenti:
 
 Odjemalec se poveže na kontrolno ravnino (entry point) in od tam dobi naslove Head/Tail strežnikov.
 
-**CLI:**
-```bash
-# Pomoč
-./out/client --help
-
-# Z drugačnim entry pointom
-./out/client --entry 127.0.0.1:6000 create-user "Janez"
-```
+Cli je namenjem testiranju komunikacije med strežnikom in odjemalcem ter nima implementiranih funkcij za mitigacijo izpadov strežnikov.
 
 **TUI:**
 ```bash
@@ -95,62 +96,24 @@ Odjemalec se poveže na kontrolno ravnino (entry point) in od tam dobi naslove H
 ./out/client -e 127.0.0.1:6000 -t
 ```
 
+Argumenti:
+- Prvi argument: naslov kontrolne ravnine (entry point)
+- `-e`: entry point strežnik
+- `-t`: omogoči TUI vmesnik
+
+**CLI:**
+```bash
+# Pomoč
+./out/client --help
+
+# Z drugačnim entry pointom
+./out/client --entry 127.0.0.1:6000 create-user "Janez"
+```
+
+
 ## Delovanje
 
 - **Writes** (CreateUser, CreateTopic, PostMessage, ...) → HEAD
 - **Reads** (ListTopics, GetMessages, GetUser) → TAIL
 - Če karkoli faila → client snitcha kontrolni ravnini
-
-## TUI vmesniki
-
-Vsi trije komponenti (client, server, control) imajo TUI vmesnik, ki se zažene z `-t` flagom.
-
-### Client TUI
-```bash
-./out/client -e 127.0.0.1:6000 --tui
-```
-- **Login screen**: Ustvari novega uporabnika ali se prijavi z obstoječim ID
-- **Topics panel**: Seznam tem, navigacija z puščicami
-- **Messages panel**: Sporočila v trenutni temi
-- **Input field**: Pisanje novih sporočil
-- **Tipke**: `Tab` = preklop panelov, `t` = nova tema, `r` = osveži, `l` = like, `d` = delete, `e` = edit, `q` = izhod
-
-### Server TUI
-```bash
-./out/server 127.0.0.1:6000 -b 127.0.0.1:5000 -t
-```
-- **Users table**: Seznam registriranih uporabnikov (ID, ime)
-- **Topics table**: Seznam tem (ID, ime, število sporočil)
-- **Chain info**: Informacije o chain replication (self, prev, next, control plane)
-- **Logs panel**: Logi strežnika
-- **Tipke**: `Tab` = preklop panelov, `q` = izhod
-
-### Control TUI
-```bash
-./out/control 127.0.0.1:6000 node1 --bootstrap-raft -t
-```
-- **Nodes table**: Seznam data plane nodov v chain (pozicija, ID, naslov, vloga HEAD/TAIL)
-- **Raft info**: Informacije o Raft clustru (state, leader, term, log index, seznam serverjev)
-- **Logs panel**: Logi kontrolne ravnine
-- **Tipke**: `Tab` = preklop panelov, `q` = izhod
-
-## Testiranje subscriptions
-
-**Naročnik:**
-```bash
-./out/client create-user "test"
-./out/client create-topic "testna tema"
-
-./out/client subscribe --user-id 0 --topic-ids 0
-```
-
-**Pošiljatelj:**
-```bash
-./out/client post --user-id 0 --topic-id 0 "sporocilotest1"
-
-./out/client like --user-id 0 --topic-id 0 --message-id 0
-
-./out/client update --user-id 0 --topic-id 0 --message-id 0 "sporocilotest2"
-
-./out/client delete --user-id 0 --topic-id 0 --message-id 0
-```
+- **Subscriptions** -> 50% možnosti entry point, 50% da naprej, če pride to repa vzame rep.

@@ -29,6 +29,7 @@ type TUI struct {
 
 	// Elementi prikaza
 	statusBar    *tview.TextView
+	logView      *tview.TextView
 	topicsList   *tview.List
 	messagesList *tview.TextView
 	inputField   *tview.InputField
@@ -37,13 +38,32 @@ type TUI struct {
 	currentTopicID int64
 	messages       []*pb.Message
 
-	subCancel context.CancelFunc
+	subCancel          context.CancelFunc
+	stateRefreshCancel context.CancelFunc
 }
 
+// tuiInstance is used for logging to TUI
+var tuiInstance *TUI
+
 func RunTUI(entryPoint string) error {
+	// Enable TUI mode to redirect logs to TUI
+	tuiMode = true
+
 	tui := &TUI{
 		app:        tview.NewApplication(),
 		entryPoint: entryPoint,
+	}
+	tuiInstance = tui
+
+	// Set up log function to write to TUI
+	tuiLogFunc = func(msg string) {
+		if tui.logView != nil && tui.app != nil {
+			tui.app.QueueUpdateDraw(func() {
+				timestamp := time.Now().Format("15:04:05")
+				fmt.Fprintf(tui.logView, "[dim]%s[white] %s\n", timestamp, msg)
+				tui.logView.ScrollToEnd()
+			})
+		}
 	}
 
 	tui.app.EnableMouse(true)
@@ -71,6 +91,14 @@ func (t *TUI) setupUI() {
 		SetText("[yellow]Not logged in[white] | Entry: " + t.entryPoint)
 	t.statusBar.SetBackgroundColor(tcell.ColorDarkBlue)
 
+	// Log view for displaying system logs
+	t.logView = tview.NewTextView().
+		SetDynamicColors(true).
+		SetScrollable(true).
+		SetMaxLines(100)
+	t.logView.SetBackgroundColor(tcell.ColorBlack)
+	t.logView.SetBorder(true).SetTitle(" Logs ").SetBorderColor(tcell.ColorDarkGray)
+
 	t.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyCtrlC {
 			t.cleanup()
@@ -85,6 +113,9 @@ func (t *TUI) cleanup() {
 	if t.subCancel != nil {
 		t.subCancel()
 	}
+	if t.stateRefreshCancel != nil {
+		t.stateRefreshCancel()
+	}
 	if t.cluster != nil {
 		t.cluster.Close()
 	}
@@ -96,6 +127,104 @@ func (t *TUI) writeClient() pb.MessageBoardClient {
 
 func (t *TUI) readClient() pb.MessageBoardClient {
 	return t.cluster.ReadClient()
+}
+
+// refreshAndGetWriteClient refreshes cluster state and returns write client
+func (t *TUI) refreshAndGetWriteClient() pb.MessageBoardClient {
+	t.tuiLog("[yellow]Refreshing cluster state...")
+	if err := t.cluster.refreshClusterState(); err != nil {
+		t.tuiLog("[red]Failed to refresh cluster state: %v", err)
+		return nil
+	}
+	t.app.QueueUpdateDraw(func() {
+		t.updateStatusBar()
+	})
+	return t.cluster.WriteClient()
+}
+
+// refreshAndGetReadClient refreshes cluster state and returns read client
+func (t *TUI) refreshAndGetReadClient() pb.MessageBoardClient {
+	t.tuiLog("[yellow]Refreshing cluster state...")
+	if err := t.cluster.refreshClusterState(); err != nil {
+		t.tuiLog("[red]Failed to refresh cluster state: %v", err)
+		return nil
+	}
+	t.app.QueueUpdateDraw(func() {
+		t.updateStatusBar()
+	})
+	return t.cluster.ReadClient()
+}
+
+// safeWriteOp executes a write operation with automatic retry on failure
+func (t *TUI) safeWriteOp(opName string, op func(client pb.MessageBoardClient) error) error {
+	client := t.writeClient()
+	if client == nil {
+		client = t.refreshAndGetWriteClient()
+		if client == nil {
+			return fmt.Errorf("no head node available")
+		}
+	}
+
+	err := op(client)
+	if err != nil {
+		t.tuiLog("[yellow]%s failed, trying to recover: %v", opName, err)
+		t.cluster.snitchAsync(t.cluster.HeadNodeID())
+
+		// Try to refresh and retry once
+		client = t.refreshAndGetWriteClient()
+		if client == nil {
+			return fmt.Errorf("no head node available after refresh")
+		}
+
+		err = op(client)
+		if err != nil {
+			return err
+		}
+		t.tuiLog("[green]%s succeeded after recovery", opName)
+	}
+	return nil
+}
+
+// safeReadOp executes a read operation with automatic retry on failure
+func (t *TUI) safeReadOp(opName string, op func(client pb.MessageBoardClient) error) error {
+	client := t.readClient()
+	if client == nil {
+		client = t.refreshAndGetReadClient()
+		if client == nil {
+			return fmt.Errorf("no tail node available")
+		}
+	}
+
+	err := op(client)
+	if err != nil {
+		t.tuiLog("[yellow]%s failed, trying to recover: %v", opName, err)
+		t.cluster.snitchAsync(t.cluster.TailNodeID())
+
+		// Try to refresh and retry once
+		client = t.refreshAndGetReadClient()
+		if client == nil {
+			return fmt.Errorf("no tail node available after refresh")
+		}
+
+		err = op(client)
+		if err != nil {
+			return err
+		}
+		t.tuiLog("[green]%s succeeded after recovery", opName)
+	}
+	return nil
+}
+
+// tuiLog writes a message to the log view
+func (t *TUI) tuiLog(format string, args ...any) {
+	if t.logView != nil && t.app != nil {
+		msg := fmt.Sprintf(format, args...)
+		t.app.QueueUpdateDraw(func() {
+			timestamp := time.Now().Format("15:04:05")
+			fmt.Fprintf(t.logView, "[dim]%s[white] %s\n", timestamp, msg)
+			t.logView.ScrollToEnd()
+		})
+	}
 }
 
 func (t *TUI) showLoginScreen() {
@@ -117,18 +246,19 @@ func (t *TUI) showLoginScreen() {
 			t.showError("Please enter a username")
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
 
-		client := t.writeClient()
-		if client == nil {
-			t.showError("No head node available")
-			return
-		}
-		user, err := client.CreateUser(ctx, &pb.CreateUserRequest{Name: username})
+		var user *pb.User
+		err := t.safeWriteOp("Create user", func(client pb.MessageBoardClient) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			var err error
+			user, err = client.CreateUser(ctx, &pb.CreateUserRequest{Name: username})
+			return err
+		})
+
 		if err != nil {
-			t.cluster.snitchAsync(t.cluster.HeadNodeID())
-			t.cluster.refreshClusterState()
+			t.tuiLog("[red]Failed to create user: %v", err)
 			t.showError(fmt.Sprintf("Failed to create user: %v", err))
 			return
 		}
@@ -147,20 +277,19 @@ func (t *TUI) showLoginScreen() {
 			t.showError("Invalid User ID")
 			return
 		}
-		// Če user obstaja
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
 
-		// bere iz repa
-		client := t.readClient()
-		if client == nil {
-			t.showError("No tail node available")
-			return
-		}
-		user, err := client.GetUser(ctx, &pb.GetUserRequest{UserId: id})
+		var user *pb.User
+		err = t.safeReadOp("Get user", func(client pb.MessageBoardClient) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			var err error
+			user, err = client.GetUser(ctx, &pb.GetUserRequest{UserId: id})
+			return err
+		})
+
 		if err != nil {
-			t.cluster.snitchAsync(t.cluster.TailNodeID())
-			t.cluster.refreshClusterState()
+			t.tuiLog("[red]User not found: %v", err)
 			t.showError(fmt.Sprintf("User not found: %v", err))
 			return
 		}
@@ -227,7 +356,7 @@ func (t *TUI) showMainScreen() {
 
 	helpText := tview.NewTextView().
 		SetDynamicColors(true).
-		SetText("[yellow]Keys:[white] Tab=switch panels | t=new topic | r=refresh | l=like msg | d=delete msg | e=edit msg | q=quit")
+		SetText("[yellow]Keys:[white] Tab=switch | t=new topic | r=refresh | l=like | d=delete | e=edit | s=servers | q=quit")
 	helpText.SetBackgroundColor(tcell.ColorDarkGreen)
 
 	// razporeditev
@@ -239,6 +368,7 @@ func (t *TUI) showMainScreen() {
 
 	layout := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(mainFlex, 0, 1, true).
+		AddItem(t.logView, 5, 0, false).
 		AddItem(helpText, 1, 0, false).
 		AddItem(t.statusBar, 1, 0, false)
 
@@ -254,6 +384,9 @@ func (t *TUI) showMainScreen() {
 				return nil
 			case 'r':
 				t.loadTopics()
+				return nil
+			case 's':
+				t.showServersDialog()
 				return nil
 			case 'q':
 				t.cleanup()
@@ -295,6 +428,9 @@ func (t *TUI) showMainScreen() {
 			case 'r':
 				t.loadMessages()
 				return nil
+			case 's':
+				t.showServersDialog()
+				return nil
 			case 'q':
 				t.cleanup()
 				t.app.Stop()
@@ -306,6 +442,9 @@ func (t *TUI) showMainScreen() {
 
 	t.pages.AddPage("main", layout, true, true)
 	t.pages.SwitchToPage("main")
+
+	// Start periodic cluster state refresh
+	t.startStateRefresh()
 
 	t.loadTopics()
 
@@ -330,6 +469,31 @@ func (t *TUI) setFocusPanel(p tview.Primitive) {
 	t.app.SetFocus(p)
 }
 
+// startStateRefresh starts a background goroutine that periodically refreshes
+// the cluster state and updates the status bar
+func (t *TUI) startStateRefresh() {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.stateRefreshCancel = cancel
+
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := t.cluster.refreshClusterState(); err == nil {
+					t.app.QueueUpdateDraw(func() {
+						t.updateStatusBar()
+					})
+				}
+			}
+		}
+	}()
+}
+
 func (t *TUI) updateStatusBar() {
 	headAddr := t.cluster.HeadAddr()
 	tailAddr := t.cluster.TailAddr()
@@ -338,19 +502,19 @@ func (t *TUI) updateStatusBar() {
 }
 
 func (t *TUI) loadTopics() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	var resp *pb.ListTopicsResponse
 
-	client := t.readClient()
-	if client == nil {
-		t.showError("No tail node available")
-		return
-	}
+	err := t.safeReadOp("Load topics", func(client pb.MessageBoardClient) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 
-	resp, err := client.ListTopics(ctx, &emptypb.Empty{})
+		var err error
+		resp, err = client.ListTopics(ctx, &emptypb.Empty{})
+		return err
+	})
+
 	if err != nil {
-		t.cluster.snitchAsync(t.cluster.TailNodeID())
-		t.cluster.refreshClusterState()
+		t.tuiLog("[red]Failed to load topics: %v", err)
 		t.showError(fmt.Sprintf("Failed to load topics: %v", err))
 		return
 	}
@@ -367,23 +531,23 @@ func (t *TUI) loadMessages() {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	var resp *pb.GetMessagesResponse
 
-	client := t.readClient()
-	if client == nil {
-		t.showError("No tail node available")
-		return
-	}
+	err := t.safeReadOp("Load messages", func(client pb.MessageBoardClient) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 
-	resp, err := client.GetMessages(ctx, &pb.GetMessagesRequest{
-		TopicId:       t.currentTopicID,
-		FromMessageId: 0,
-		Limit:         100,
+		var err error
+		resp, err = client.GetMessages(ctx, &pb.GetMessagesRequest{
+			TopicId:       t.currentTopicID,
+			FromMessageId: 0,
+			Limit:         100,
+		})
+		return err
 	})
+
 	if err != nil {
-		t.cluster.snitchAsync(t.cluster.TailNodeID())
-		t.cluster.refreshClusterState()
+		t.tuiLog("[red]Failed to load messages: %v", err)
 		t.showError(fmt.Sprintf("Failed to load messages: %v", err))
 		return
 	}
@@ -434,23 +598,23 @@ func (t *TUI) sendMessage() {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	topicID := t.currentTopicID
+	userID := t.currentUserID
 
-	client := t.writeClient()
-	if client == nil {
-		t.showError("No head node available")
-		return
-	}
+	err := t.safeWriteOp("Send message", func(client pb.MessageBoardClient) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 
-	_, err := client.PostMessage(ctx, &pb.PostMessageRequest{
-		TopicId: t.currentTopicID,
-		UserId:  t.currentUserID,
-		Text:    text,
+		_, err := client.PostMessage(ctx, &pb.PostMessageRequest{
+			TopicId: topicID,
+			UserId:  userID,
+			Text:    text,
+		})
+		return err
 	})
+
 	if err != nil {
-		t.cluster.snitchAsync(t.cluster.HeadNodeID())
-		t.cluster.refreshClusterState()
+		t.tuiLog("[red]Failed to send message: %v", err)
 		t.showError(fmt.Sprintf("Failed to send message: %v", err))
 		return
 	}
@@ -471,19 +635,17 @@ func (t *TUI) showNewTopicDialog() {
 		if topicName == "" {
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
 
-		client := t.writeClient()
-		if client == nil {
-			t.showError("No head node available")
-			return
-		}
+		err := t.safeWriteOp("Create topic", func(client pb.MessageBoardClient) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
 
-		_, err := client.CreateTopic(ctx, &pb.CreateTopicRequest{Name: topicName})
+			_, err := client.CreateTopic(ctx, &pb.CreateTopicRequest{Name: topicName})
+			return err
+		})
+
 		if err != nil {
-			t.cluster.snitchAsync(t.cluster.HeadNodeID())
-			t.cluster.refreshClusterState()
+			t.tuiLog("[red]Failed to create topic: %v", err)
 			t.showError(fmt.Sprintf("Failed to create topic: %v", err))
 			return
 		}
@@ -521,24 +683,23 @@ func (t *TUI) showLikeDialog() {
 			return
 		}
 		msgID, _ := strconv.ParseInt(msgIDStr, 10, 64)
+		topicID := t.currentTopicID
+		userID := t.currentUserID
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+		err := t.safeWriteOp("Like message", func(client pb.MessageBoardClient) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
 
-		client := t.writeClient()
-		if client == nil {
-			t.showError("No head node available")
-			return
-		}
-
-		_, err := client.LikeMessage(ctx, &pb.LikeMessageRequest{
-			TopicId:   t.currentTopicID,
-			MessageId: msgID,
-			UserId:    t.currentUserID,
+			_, err := client.LikeMessage(ctx, &pb.LikeMessageRequest{
+				TopicId:   topicID,
+				MessageId: msgID,
+				UserId:    userID,
+			})
+			return err
 		})
+
 		if err != nil {
-			t.cluster.snitchAsync(t.cluster.HeadNodeID())
-			t.cluster.refreshClusterState()
+			t.tuiLog("[red]Failed to like message: %v", err)
 			t.showError(fmt.Sprintf("Failed to like message: %v", err))
 			return
 		}
@@ -576,24 +737,23 @@ func (t *TUI) showDeleteDialog() {
 			return
 		}
 		msgID, _ := strconv.ParseInt(msgIDStr, 10, 64)
+		topicID := t.currentTopicID
+		userID := t.currentUserID
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+		err := t.safeWriteOp("Delete message", func(client pb.MessageBoardClient) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
 
-		client := t.writeClient()
-		if client == nil {
-			t.showError("No head node available")
-			return
-		}
-
-		_, err := client.DeleteMessage(ctx, &pb.DeleteMessageRequest{
-			TopicId:   t.currentTopicID,
-			MessageId: msgID,
-			UserId:    t.currentUserID,
+			_, err := client.DeleteMessage(ctx, &pb.DeleteMessageRequest{
+				TopicId:   topicID,
+				MessageId: msgID,
+				UserId:    userID,
+			})
+			return err
 		})
+
 		if err != nil {
-			t.cluster.snitchAsync(t.cluster.HeadNodeID())
-			t.cluster.refreshClusterState()
+			t.tuiLog("[red]Failed to delete message: %v", err)
 			t.showError(fmt.Sprintf("Failed to delete message: %v", err))
 			return
 		}
@@ -635,25 +795,25 @@ func (t *TUI) showEditDialog() {
 			return
 		}
 		msgID, _ := strconv.ParseInt(msgIDStr, 10, 64)
+		topicID := t.currentTopicID
+		userID := t.currentUserID
+		text := newText
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+		err := t.safeWriteOp("Update message", func(client pb.MessageBoardClient) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
 
-		client := t.writeClient()
-		if client == nil {
-			t.showError("No head node available")
-			return
-		}
-
-		_, err := client.UpdateMessage(ctx, &pb.UpdateMessageRequest{
-			TopicId:   t.currentTopicID,
-			MessageId: msgID,
-			UserId:    t.currentUserID,
-			Text:      newText,
+			_, err := client.UpdateMessage(ctx, &pb.UpdateMessageRequest{
+				TopicId:   topicID,
+				MessageId: msgID,
+				UserId:    userID,
+				Text:      text,
+			})
+			return err
 		})
+
 		if err != nil {
-			t.cluster.snitchAsync(t.cluster.HeadNodeID())
-			t.cluster.refreshClusterState()
+			t.tuiLog("[red]Failed to update message: %v", err)
 			t.showError(fmt.Sprintf("Failed to update message: %v", err))
 			return
 		}
@@ -677,6 +837,53 @@ func (t *TUI) showEditDialog() {
 	t.pages.AddPage("edit", modal, true, true)
 }
 
+func (t *TUI) showServersDialog() {
+	// Refresh cluster state first
+	t.cluster.refreshClusterState()
+
+	headAddr := t.cluster.HeadAddr()
+	headNodeID := t.cluster.HeadNodeID()
+	tailAddr := t.cluster.TailAddr()
+	tailNodeID := t.cluster.TailNodeID()
+	controlAddrs := t.cluster.ControlAddrs()
+
+	var sb strings.Builder
+	sb.WriteString("[yellow]Control Plane Servers:[white]\n")
+	for i, addr := range controlAddrs {
+		sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, addr))
+	}
+	sb.WriteString("\n[yellow]Data Plane Servers:[white]\n")
+	sb.WriteString(fmt.Sprintf("  [green]Head:[white] %s (ID: %d)\n", headAddr, headNodeID))
+	sb.WriteString(fmt.Sprintf("  [blue]Tail:[white] %s (ID: %d)\n", tailAddr, tailNodeID))
+
+	textView := tview.NewTextView().
+		SetDynamicColors(true).
+		SetText(sb.String())
+	textView.SetBorder(true).SetTitle(" Cluster Servers ").SetTitleAlign(tview.AlignCenter)
+	textView.SetBackgroundColor(tcell.ColorBlack)
+
+	textView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEscape || event.Key() == tcell.KeyEnter ||
+			(event.Key() == tcell.KeyRune && (event.Rune() == 'q' || event.Rune() == 's')) {
+			t.pages.RemovePage("servers")
+			return nil
+		}
+		return event
+	})
+
+	modal := tview.NewFlex().
+		AddItem(nil, 0, 1, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(nil, 0, 1, false).
+			AddItem(textView, 15, 1, true).
+			AddItem(nil, 0, 1, false), 60, 1, true).
+		AddItem(nil, 0, 1, false)
+
+	t.pages.AddPage("servers", modal, true, true)
+	t.app.SetFocus(textView)
+	t.updateStatusBar()
+}
+
 func (t *TUI) showError(message string) {
 	modal := tview.NewModal().
 		SetText(message).
@@ -698,21 +905,30 @@ func (t *TUI) startSubscription() {
 		return
 	}
 
-	client := t.writeClient() // GetSubscriptionNode čez nodes
-	if client == nil {
+	var subNodeResp *pb.SubscriptionNodeResponse
+	topicID := t.currentTopicID
+	userID := t.currentUserID
+
+	err := t.safeWriteOp("Get subscription node", func(client pb.MessageBoardClient) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		var err error
+		subNodeResp, err = client.GetSubscriptionNode(ctx, &pb.SubscriptionNodeRequest{
+			UserId:  userID,
+			TopicId: []int64{topicID},
+		})
+		return err
+	})
+
+	if err != nil {
+		t.tuiLog("[red]Subscription failed: %v", err)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	subNodeResp, err := client.GetSubscriptionNode(ctx, &pb.SubscriptionNodeRequest{
-		UserId:  t.currentUserID,
-		TopicId: []int64{t.currentTopicID},
-	})
-	cancel()
-
-	if err != nil {
-		t.cluster.snitchAsync(t.cluster.HeadNodeID())
-		t.cluster.refreshClusterState()
+	// Check if node info is valid
+	if subNodeResp == nil || subNodeResp.Node == nil || subNodeResp.Node.Address == "" {
+		t.tuiLog("[red]Subscription failed: no valid subscription node")
 		return
 	}
 
@@ -761,8 +977,10 @@ func (t *TUI) startSubscription() {
 				case pb.OpType_OP_DELETE:
 					opName = "DELETE"
 				}
-				t.statusBar.SetText(fmt.Sprintf("[green]User: %s[white] | [cyan]Event: %s on msg #%d[white]",
-					t.currentUserName, opName, event.Message.Id))
+				// Log event to log view instead of status bar
+				timestamp := time.Now().Format("15:04:05")
+				fmt.Fprintf(t.logView, "[dim]%s[white] [cyan]Event:[white] %s on msg #%d\n", timestamp, opName, event.Message.Id)
+				t.logView.ScrollToEnd()
 			})
 		}
 	}()

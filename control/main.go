@@ -294,7 +294,10 @@ func (s *ControlPlaneServer) idToNode(id int64) *Node {
 
 func (s *ControlPlaneServer) removeNode(id int64, shutdown bool) {
 	if shutdown {
-		go sendShutdown(s.idToNode(id).address)
+		node := s.idToNode(id)
+		if node != nil {
+			go sendShutdown(node.address)
+		}
 	}
 	req := []byte("-")
 	req = strconv.AppendInt(req, id, 10)

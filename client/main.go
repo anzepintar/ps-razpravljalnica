@@ -42,8 +42,11 @@ const (
 	stateCacheTTL = 30 * time.Second
 )
 
+// tuiMode disables logging output when TUI is active
+var tuiMode = false
+
 var CLI struct {
-	EntryPoint string        `help:"Entry point address (control plane node)" default:"localhost:6000" name:"entry" short:"e"`
+	EntryPoint string        `help:"Entry point address (control plane node)" default:"127.0.0.1:6000" name:"entry" short:"e"`
 	Timeout    time.Duration `help:"Request timeout" default:"5s" name:"timeout"`
 	Tui        bool          `short:"t" help:"Enable TUI mode"`
 
@@ -113,8 +116,8 @@ func parseTUIFlags() (bool, string, error) {
 
 	tuiMode := tuiFlags.Bool("t", false, "Enable TUI mode")
 	tuiModeLong := tuiFlags.Bool("tui", false, "Enable TUI mode")
-	entryPoint := tuiFlags.String("e", "localhost:6000", "Entry point address")
-	entryPointLong := tuiFlags.String("entry", "localhost:6000", "Entry point address")
+	entryPoint := tuiFlags.String("e", "127.0.0.1:6000", "Entry point address")
+	entryPointLong := tuiFlags.String("entry", "127.0.0.1:6000", "Entry point address")
 
 	args := os.Args[1:]
 	var remainingArgs []string
@@ -141,7 +144,7 @@ func parseTUIFlags() (bool, string, error) {
 
 	isTUI := *tuiMode || *tuiModeLong
 	ep := *entryPoint
-	if *entryPointLong != "localhost:6000" {
+	if *entryPointLong != "127.0.0.1:6000" {
 		ep = *entryPointLong
 	}
 
@@ -265,7 +268,7 @@ func (c *ClusterClient) refreshClusterState() error {
 	return c.refreshClusterStateLocked()
 }
 
-// normalizacija za localhost ipd
+// normalizacija za 127.0.0.1 ipd
 func normalizeAddress(addr string) string {
 	if strings.Contains(addr, "://") {
 		return addr
@@ -282,7 +285,7 @@ func (c *ClusterClient) refreshClusterStateLocked() error {
 	if err != nil {
 		// Try to use cached state for graceful degradation
 		if c.cachedState != nil && c.cachedState.IsValid() {
-			log.Printf("Warning: failed to connect to entry point, using cached state (age: %v)",
+			logMessage("Warning: failed to connect to entry point, using cached state (age: %v)",
 				time.Since(c.cachedState.CachedAt))
 			return nil
 		}
@@ -298,7 +301,7 @@ func (c *ClusterClient) refreshClusterStateLocked() error {
 	if err != nil {
 		// Try to use cached state for graceful degradation
 		if c.cachedState != nil && c.cachedState.IsValid() {
-			log.Printf("Warning: failed to get cluster state, using cached state (age: %v)",
+			logMessage("Warning: failed to get cluster state, using cached state (age: %v)",
 				time.Since(c.cachedState.CachedAt))
 			return nil
 		}
@@ -337,7 +340,7 @@ func (c *ClusterClient) refreshClusterStateLocked() error {
 				grpc.WithKeepaliveParams(c.keepaliveParams),
 			)
 			if err != nil {
-				log.Printf("Warning: could not create multi-resolver connection: %v", err)
+				logMessage("Warning: could not create multi-resolver connection: %v", err)
 				c.controlConn, err = grpc.NewClient(normalizeAddress(c.controlAddrs[0]),
 					grpc.WithTransportCredentials(insecure.NewCredentials()),
 					grpc.WithUnaryInterceptor(grpc_retry.UnaryClientInterceptor(retryOpts...)),
@@ -415,7 +418,7 @@ func (c *ClusterClient) snitchWithRetries(nodeID int64, maxRetries int) error {
 
 	if client == nil {
 		err := errors.New("no control plane client available")
-		log.Printf("Warning: snitch failed: %v", err)
+		logMessage("Warning: snitch failed: %v", err)
 		return &SnitchError{NodeID: nodeID, Retries: 0, Err: err}
 	}
 
@@ -430,11 +433,11 @@ func (c *ClusterClient) snitchWithRetries(nodeID int64, maxRetries int) error {
 		cancel()
 
 		if lastErr == nil {
-			log.Printf("Successfully snitched on node %d (attempt %d)", nodeID, attempt+1)
+			logMessage("Successfully snitched on node %d (attempt %d)", nodeID, attempt+1)
 			return nil
 		}
 
-		log.Printf("Snitch attempt %d/%d failed for node %d: %v", attempt+1, maxRetries, nodeID, lastErr)
+		logMessage("Snitch attempt %d/%d failed for node %d: %v", attempt+1, maxRetries, nodeID, lastErr)
 	}
 
 	return &SnitchError{NodeID: nodeID, Retries: maxRetries, Err: lastErr}
@@ -444,7 +447,7 @@ func (c *ClusterClient) snitchWithRetries(nodeID int64, maxRetries int) error {
 func (c *ClusterClient) snitchAsync(nodeID int64) {
 	go func() {
 		if err := c.snitch(nodeID); err != nil {
-			log.Printf("Async snitch failed: %v", err)
+			logMessage("Async snitch failed: %v", err)
 		}
 	}()
 }
@@ -483,6 +486,28 @@ func (c *ClusterClient) TailNodeID() int64 {
 	c.mtx.RLock()
 	defer c.mtx.RUnlock()
 	return c.tailNodeID
+}
+
+// ControlAddrs returns the list of control plane addresses
+func (c *ClusterClient) ControlAddrs() []string {
+	c.mtx.RLock()
+	defer c.mtx.RUnlock()
+	addrs := make([]string, len(c.controlAddrs))
+	copy(addrs, c.controlAddrs)
+	return addrs
+}
+
+// tuiLogFunc is set by TUI to receive log messages
+var tuiLogFunc func(string)
+
+// logMessage logs to TUI if available, otherwise to standard log
+func logMessage(format string, v ...any) {
+	msg := fmt.Sprintf(format, v...)
+	if tuiMode && tuiLogFunc != nil {
+		tuiLogFunc(msg)
+	} else {
+		log.Print(msg)
+	}
 }
 
 // startHealthCheck starts a background goroutine that periodically checks
@@ -524,7 +549,7 @@ func (c *ClusterClient) performHealthCheck() {
 		_, err := headClient.ListTopics(ctx, &emptypb.Empty{})
 		cancel()
 		if err != nil {
-			log.Printf("Health check: head node %d unhealthy: %v", headNodeID, err)
+			logMessage("Health check: head node %d unhealthy: %v", headNodeID, err)
 			c.snitchAsync(headNodeID)
 			needsRefresh = true
 		}
@@ -536,16 +561,16 @@ func (c *ClusterClient) performHealthCheck() {
 		_, err := tailClient.ListTopics(ctx, &emptypb.Empty{})
 		cancel()
 		if err != nil {
-			log.Printf("Health check: tail node %d unhealthy: %v", tailNodeID, err)
+			logMessage("Health check: tail node %d unhealthy: %v", tailNodeID, err)
 			c.snitchAsync(tailNodeID)
 			needsRefresh = true
 		}
 	}
 
 	if needsRefresh {
-		log.Printf("Health check triggered cluster state refresh")
+		logMessage("Health check triggered cluster state refresh")
 		if err := c.refreshClusterState(); err != nil {
-			log.Printf("Health check: failed to refresh cluster state: %v", err)
+			logMessage("Health check: failed to refresh cluster state: %v", err)
 		}
 	}
 }

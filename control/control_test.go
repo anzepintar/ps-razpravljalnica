@@ -57,7 +57,7 @@ func TestValidateNodeAddress(t *testing.T) {
 		addr    string
 		wantErr bool
 	}{
-		{"veljavni naslov", "localhost:6000", false},
+		{"veljavni naslov", "127.0.0.1:6000", false},
 		{"IP naslov", "192.168.1.1:8080", false},
 		{"prazno", "", true},
 		{"samo presledki", "   ", true},
@@ -129,9 +129,9 @@ func TestValidateRaftID(t *testing.T) {
 func TestControlPlaneServer_IdToNode(t *testing.T) {
 	srv := &ControlPlaneServer{
 		Nodes: []Node{
-			{id: 0, address: "localhost:8001"},
-			{id: 1, address: "localhost:8002"},
-			{id: 5, address: "localhost:8003"},
+			{id: 0, address: "127.0.0.1:8001"},
+			{id: 1, address: "127.0.0.1:8002"},
+			{id: 5, address: "127.0.0.1:8003"},
 		},
 	}
 
@@ -141,9 +141,9 @@ func TestControlPlaneServer_IdToNode(t *testing.T) {
 		wantNil     bool
 		wantAddress string
 	}{
-		{"obstaja id 0", 0, false, "localhost:8001"},
-		{"obstaja id 1", 1, false, "localhost:8002"},
-		{"obstaja id 5", 5, false, "localhost:8003"},
+		{"obstaja id 0", 0, false, "127.0.0.1:8001"},
+		{"obstaja id 1", 1, false, "127.0.0.1:8002"},
+		{"obstaja id 5", 5, false, "127.0.0.1:8003"},
 		{"ne obstaja id 2", 2, true, ""},
 		{"ne obstaja id 100", 100, true, ""},
 	}
@@ -165,20 +165,20 @@ func TestControlPlaneServer_IdToNode(t *testing.T) {
 }
 
 func TestNodeStruct(t *testing.T) {
-	node := Node{id: 42, address: "localhost:9000"}
+	node := Node{id: 42, address: "127.0.0.1:9000"}
 
 	if node.id != 42 {
 		t.Errorf("Node.id = %d, want 42", node.id)
 	}
-	if node.address != "localhost:9000" {
-		t.Errorf("Node.address = %q, want %q", node.address, "localhost:9000")
+	if node.address != "127.0.0.1:9000" {
+		t.Errorf("Node.address = %q, want %q", node.address, "127.0.0.1:9000")
 	}
 }
 
 func TestSnapshotStruct(t *testing.T) {
 	nodes := []Node{
-		{id: 0, address: "localhost:8001"},
-		{id: 1, address: "localhost:8002"},
+		{id: 0, address: "127.0.0.1:8001"},
+		{id: 1, address: "127.0.0.1:8002"},
 	}
 	snapshot := Snapshot{idx: 5, nodes: nodes}
 
@@ -196,7 +196,7 @@ func TestSnapshotRelease(t *testing.T) {
 }
 
 func FuzzValidateNodeAddress(f *testing.F) {
-	f.Add("localhost:6000")
+	f.Add("127.0.0.1:6000")
 	f.Add("")
 	f.Add("   ")
 	f.Add(strings.Repeat("a", 255))

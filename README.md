@@ -42,11 +42,11 @@ go test -fuzz=FuzzValidateNodeAddress -fuzztime=30s ./control
 Za cluster z več nodi (3-node cluster):
 ```bash
 # bootstrap node
-./out/control localhost:6000 node1 --bootstrap-raft
+./out/control 127.0.0.1:6000 node1 --bootstrap-raft
 
-./out/control localhost:6001 node2 localhost:6000
+./out/control 127.0.0.1:6001 node2 127.0.0.1:6000
 
-./out/control localhost:6002 node3 localhost:6000 localhost:6001
+./out/control 127.0.0.1:6002 node3 127.0.0.1:6000 127.0.0.1:6001
 ```
 
 Argumenti:
@@ -61,12 +61,12 @@ Argumenti:
 Zaženemo enega ali več strežnikov. Vsak strežnik se registrira pri kontrolni ravnini:
 ```bash
 # Head
-./out/server localhost:6000 -b localhost:5000
+./out/server 127.0.0.1:6000 -b 127.0.0.1:5000
 
-./out/server localhost:6000 -b localhost:5001
+./out/server 127.0.0.1:6000 -b 127.0.0.1:5001
 
 # Tail
-./out/server localhost:6000 -b localhost:5002
+./out/server 127.0.0.1:6000 -b 127.0.0.1:5002
 ```
 
 Argumenti:
@@ -84,7 +84,7 @@ Odjemalec se poveže na kontrolno ravnino (entry point) in od tam dobi naslove H
 ./out/client --help
 
 # Z drugačnim entry pointom
-./out/client --entry localhost:6000 create-user "Janez"
+./out/client --entry 127.0.0.1:6000 create-user "Janez"
 ```
 
 **TUI:**
@@ -92,7 +92,7 @@ Odjemalec se poveže na kontrolno ravnino (entry point) in od tam dobi naslove H
 ./out/client -t
 
 # Z drugačnim entry pointom
-./out/client -e localhost:6000 -t
+./out/client -e 127.0.0.1:6000 -t
 ```
 
 ## Delovanje
@@ -107,7 +107,7 @@ Vsi trije komponenti (client, server, control) imajo TUI vmesnik, ki se zažene 
 
 ### Client TUI
 ```bash
-./out/client -t
+./out/client -e 127.0.0.1:6000 --tui
 ```
 - **Login screen**: Ustvari novega uporabnika ali se prijavi z obstoječim ID
 - **Topics panel**: Seznam tem, navigacija z puščicami
@@ -117,7 +117,7 @@ Vsi trije komponenti (client, server, control) imajo TUI vmesnik, ki se zažene 
 
 ### Server TUI
 ```bash
-./out/server localhost:6000 -b localhost:5000 -t
+./out/server 127.0.0.1:6000 -b 127.0.0.1:5000 -t
 ```
 - **Users table**: Seznam registriranih uporabnikov (ID, ime)
 - **Topics table**: Seznam tem (ID, ime, število sporočil)
@@ -127,7 +127,7 @@ Vsi trije komponenti (client, server, control) imajo TUI vmesnik, ki se zažene 
 
 ### Control TUI
 ```bash
-./out/control localhost:6000 node1 --bootstrap-raft -t
+./out/control 127.0.0.1:6000 node1 --bootstrap-raft -t
 ```
 - **Nodes table**: Seznam data plane nodov v chain (pozicija, ID, naslov, vloga HEAD/TAIL)
 - **Raft info**: Informacije o Raft clustru (state, leader, term, log index, seznam serverjev)

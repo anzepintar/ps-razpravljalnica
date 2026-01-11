@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -16,6 +18,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	pb "github.com/anzepintar/ps-razpravljalnica/client/razpravljalnica"
@@ -23,6 +26,20 @@ import (
 	_ "github.com/Jille/grpc-multi-resolver"
 	_ "github.com/Jille/raft-grpc-leader-rpc/leaderhealth"
 	_ "google.golang.org/grpc/health"
+)
+
+const (
+	connectionIdleTimeout      = 5 * time.Minute
+	connectionKeepaliveTime    = 30 * time.Second
+	connectionKeepaliveTimeout = 10 * time.Second
+
+	healthCheckInterval = 15 * time.Second
+	healthCheckTimeout  = 3 * time.Second
+
+	snitchMaxRetries    = 3
+	snitchRetryInterval = 500 * time.Millisecond
+
+	stateCacheTTL = 30 * time.Second
 )
 
 var CLI struct {
@@ -90,27 +107,60 @@ type SubscribeCmd struct {
 	From     int64  `name:"from" help:"From message id" default:"0"`
 }
 
-func main() {
-	// Check for -t flag before kong parsing to allow TUI without command
-	for _, arg := range os.Args[1:] {
+func parseTUIFlags() (bool, string, error) {
+	tuiFlags := flag.NewFlagSet("tui", flag.ContinueOnError)
+	tuiFlags.SetOutput(io.Discard)
+
+	tuiMode := tuiFlags.Bool("t", false, "Enable TUI mode")
+	tuiModeLong := tuiFlags.Bool("tui", false, "Enable TUI mode")
+	entryPoint := tuiFlags.String("e", "localhost:6000", "Entry point address")
+	entryPointLong := tuiFlags.String("entry", "localhost:6000", "Entry point address")
+
+	args := os.Args[1:]
+	var remainingArgs []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		// Handle combined short flags like -t or -e=value
 		if arg == "-t" || arg == "--tui" {
-			entryPoint := "localhost:6000"
-			// Check for -e flag
-			for i, a := range os.Args[1:] {
-				if (a == "-e" || a == "--entry") && i+2 < len(os.Args) {
-					entryPoint = os.Args[i+2]
-				} else if len(a) > 3 && a[:3] == "-e=" {
-					entryPoint = a[3:]
-				} else if len(a) > 8 && a[:8] == "--entry=" {
-					entryPoint = a[8:]
-				}
-			}
-			if err := RunTUI(entryPoint); err != nil {
-				fmt.Printf("TUI Error: %v\n", err)
-				os.Exit(1)
-			}
-			os.Exit(0)
+			*tuiMode = true
+			*tuiModeLong = true
+		} else if arg == "-e" && i+1 < len(args) {
+			*entryPoint = args[i+1]
+			i++
+		} else if arg == "--entry" && i+1 < len(args) {
+			*entryPointLong = args[i+1]
+			i++
+		} else if strings.HasPrefix(arg, "-e=") {
+			*entryPoint = strings.TrimPrefix(arg, "-e=")
+		} else if strings.HasPrefix(arg, "--entry=") {
+			*entryPointLong = strings.TrimPrefix(arg, "--entry=")
+		} else {
+			remainingArgs = append(remainingArgs, arg)
 		}
+	}
+
+	isTUI := *tuiMode || *tuiModeLong
+	ep := *entryPoint
+	if *entryPointLong != "localhost:6000" {
+		ep = *entryPointLong
+	}
+
+	return isTUI, ep, nil
+}
+
+func main() {
+	isTUI, entryPoint, err := parseTUIFlags()
+	if err != nil {
+		fmt.Printf("Error parsing flags: %v\n", err)
+		os.Exit(1)
+	}
+
+	if isTUI {
+		if err := RunTUI(entryPoint); err != nil {
+			fmt.Printf("TUI Error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
 
 	ctx := kong.Parse(&CLI,
@@ -123,6 +173,36 @@ func main() {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+type SnitchError struct {
+	NodeID  int64
+	Retries int
+	Err     error
+}
+
+func (e *SnitchError) Error() string {
+	return fmt.Sprintf("snitch failed for node %d after %d retries: %v", e.NodeID, e.Retries, e.Err)
+}
+
+func (e *SnitchError) Unwrap() error {
+	return e.Err
+}
+
+type CachedClusterState struct {
+	ControlAddrs []string
+	HeadAddr     string
+	HeadNodeID   int64
+	TailAddr     string
+	TailNodeID   int64
+	CachedAt     time.Time
+}
+
+func (c *CachedClusterState) IsValid() bool {
+	if c == nil {
+		return false
+	}
+	return time.Since(c.CachedAt) < stateCacheTTL
 }
 
 // Ureja povezave na cluster
@@ -148,16 +228,32 @@ type ClusterClient struct {
 	tailNodeID int64
 	tailConn   *grpc.ClientConn
 	tailClient pb.MessageBoardClient
+
+	keepaliveParams keepalive.ClientParameters
+
+	cachedState *CachedClusterState
+
+	healthCheckCancel context.CancelFunc
+	healthCheckDone   chan struct{}
 }
 
 func NewClusterClient(entryPoint string) (*ClusterClient, error) {
 	c := &ClusterClient{
 		entryPoint: entryPoint,
+		keepaliveParams: keepalive.ClientParameters{
+			Time:                connectionKeepaliveTime,
+			Timeout:             connectionKeepaliveTimeout,
+			PermitWithoutStream: true, // Send pings even without active streams
+		},
+		healthCheckDone: make(chan struct{}),
 	}
 
 	if err := c.refreshClusterState(); err != nil {
 		return nil, err
 	}
+
+	// Start background health checking
+	c.startHealthCheck()
 
 	return c, nil
 }
@@ -166,10 +262,30 @@ func (c *ClusterClient) refreshClusterState() error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 
+	return c.refreshClusterStateLocked()
+}
+
+// normalizacija za localhost ipd
+func normalizeAddress(addr string) string {
+	if strings.Contains(addr, "://") {
+		return addr
+	}
+	return "passthrough:///" + addr
+}
+
+func (c *ClusterClient) refreshClusterStateLocked() error {
 	// najprej povezava na vhodni node
-	conn, err := grpc.NewClient(c.entryPoint,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	target := normalizeAddress(c.entryPoint)
+	conn, err := grpc.NewClient(target,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(c.keepaliveParams))
 	if err != nil {
+		// Try to use cached state for graceful degradation
+		if c.cachedState != nil && c.cachedState.IsValid() {
+			log.Printf("Warning: failed to connect to entry point, using cached state (age: %v)",
+				time.Since(c.cachedState.CachedAt))
+			return nil
+		}
 		return fmt.Errorf("failed to connect to entry point %s: %v", c.entryPoint, err)
 	}
 
@@ -180,6 +296,12 @@ func (c *ClusterClient) refreshClusterState() error {
 	state, err := client.GetClusterStateClient(ctx, &emptypb.Empty{})
 	conn.Close()
 	if err != nil {
+		// Try to use cached state for graceful degradation
+		if c.cachedState != nil && c.cachedState.IsValid() {
+			log.Printf("Warning: failed to get cluster state, using cached state (age: %v)",
+				time.Since(c.cachedState.CachedAt))
+			return nil
+		}
 		return fmt.Errorf("failed to get cluster state: %v", err)
 	}
 
@@ -191,8 +313,15 @@ func (c *ClusterClient) refreshClusterState() error {
 	//  multi:///  naslov
 	if len(c.controlAddrs) > 0 {
 		multiAddr := "multi:///" + strings.Join(c.controlAddrs, ",")
-		if c.controlConn != nil {
+		// Only close and recreate if addresses changed
+		newAddrs := strings.Join(c.controlAddrs, ",")
+		oldAddrs := ""
+		if c.cachedState != nil {
+			oldAddrs = strings.Join(c.cachedState.ControlAddrs, ",")
+		}
+		if c.controlConn != nil && newAddrs != oldAddrs {
 			c.controlConn.Close()
+			c.controlConn = nil
 		}
 		// Retry options for control plane calls (leader might change)
 		retryOpts := []grpc_retry.CallOption{
@@ -200,33 +329,39 @@ func (c *ClusterClient) refreshClusterState() error {
 			grpc_retry.WithMax(5),
 			grpc_retry.WithCodes(codes.Unavailable, codes.ResourceExhausted),
 		}
-		c.controlConn, err = grpc.NewClient(multiAddr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithDefaultServiceConfig(`{"healthCheckConfig": {"serviceName": ""}}`),
-			grpc.WithUnaryInterceptor(grpc_retry.UnaryClientInterceptor(retryOpts...)),
-		)
-		if err != nil {
-			log.Printf("Warning: could not create multi-resolver connection: %v", err)
-			c.controlConn, err = grpc.NewClient(c.controlAddrs[0],
+		if c.controlConn == nil {
+			c.controlConn, err = grpc.NewClient(multiAddr,
 				grpc.WithTransportCredentials(insecure.NewCredentials()),
-				grpc.WithUnaryInterceptor(grpc_retry.UnaryClientInterceptor(retryOpts...)))
+				grpc.WithDefaultServiceConfig(`{"healthCheckConfig": {"serviceName": ""}}`),
+				grpc.WithUnaryInterceptor(grpc_retry.UnaryClientInterceptor(retryOpts...)),
+				grpc.WithKeepaliveParams(c.keepaliveParams),
+			)
 			if err != nil {
-				return fmt.Errorf("failed to connect to control plane: %v", err)
+				log.Printf("Warning: could not create multi-resolver connection: %v", err)
+				c.controlConn, err = grpc.NewClient(normalizeAddress(c.controlAddrs[0]),
+					grpc.WithTransportCredentials(insecure.NewCredentials()),
+					grpc.WithUnaryInterceptor(grpc_retry.UnaryClientInterceptor(retryOpts...)),
+					grpc.WithKeepaliveParams(c.keepaliveParams))
+				if err != nil {
+					return fmt.Errorf("failed to connect to control plane: %v", err)
+				}
 			}
+			c.controlClient = pb.NewControlPlaneClient(c.controlConn)
 		}
-		c.controlClient = pb.NewControlPlaneClient(c.controlConn)
 	}
 
-	// head za pisanje
+	// head za pisanje - ponovno uporabi povezavo, če se ne spremeni
 	if state.Head != nil {
 		if c.headConn != nil && c.headAddr != state.Head.Address {
 			c.headConn.Close()
+			c.headConn = nil
 		}
-		if c.headAddr != state.Head.Address {
+		if c.headConn == nil || c.headAddr != state.Head.Address {
 			c.headAddr = state.Head.Address
 			c.headNodeID = state.Head.NodeId
-			c.headConn, err = grpc.NewClient(c.headAddr,
-				grpc.WithTransportCredentials(insecure.NewCredentials()))
+			c.headConn, err = grpc.NewClient(normalizeAddress(c.headAddr),
+				grpc.WithTransportCredentials(insecure.NewCredentials()),
+				grpc.WithKeepaliveParams(c.keepaliveParams))
 			if err != nil {
 				return fmt.Errorf("failed to connect to head %s: %v", c.headAddr, err)
 			}
@@ -238,12 +373,14 @@ func (c *ClusterClient) refreshClusterState() error {
 	if state.Tail != nil {
 		if c.tailConn != nil && c.tailAddr != state.Tail.Address {
 			c.tailConn.Close()
+			c.tailConn = nil
 		}
-		if c.tailAddr != state.Tail.Address {
+		if c.tailConn == nil || c.tailAddr != state.Tail.Address {
 			c.tailAddr = state.Tail.Address
 			c.tailNodeID = state.Tail.NodeId
-			c.tailConn, err = grpc.NewClient(c.tailAddr,
-				grpc.WithTransportCredentials(insecure.NewCredentials()))
+			c.tailConn, err = grpc.NewClient(normalizeAddress(c.tailAddr),
+				grpc.WithTransportCredentials(insecure.NewCredentials()),
+				grpc.WithKeepaliveParams(c.keepaliveParams))
 			if err != nil {
 				return fmt.Errorf("failed to connect to tail %s: %v", c.tailAddr, err)
 			}
@@ -251,27 +388,65 @@ func (c *ClusterClient) refreshClusterState() error {
 		}
 	}
 
+	// Update cached state for graceful degradation
+	c.cachedState = &CachedClusterState{
+		ControlAddrs: c.controlAddrs,
+		HeadAddr:     c.headAddr,
+		HeadNodeID:   c.headNodeID,
+		TailAddr:     c.tailAddr,
+		TailNodeID:   c.tailNodeID,
+		CachedAt:     time.Now(),
+	}
+
 	return nil
 }
 
-func (c *ClusterClient) snitch(nodeID int64) {
+// snitch reports a failed node to the control plane with retry logic
+// Returns a SnitchError if all retries fail, nil on success
+func (c *ClusterClient) snitch(nodeID int64) error {
+	return c.snitchWithRetries(nodeID, snitchMaxRetries)
+}
+
+// snitchWithRetries reports a failed node with configurable retries
+func (c *ClusterClient) snitchWithRetries(nodeID int64, maxRetries int) error {
 	c.mtx.RLock()
 	client := c.controlClient
 	c.mtx.RUnlock()
 
 	if client == nil {
-		log.Printf("Warning: no control plane client available to snitch")
-		return
-	}
-
-	// Report the failed node to control plane
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	_, err := client.Snitch(ctx, &pb.SnitchRequest{NodeId: nodeID})
-	if err != nil {
+		err := errors.New("no control plane client available")
 		log.Printf("Warning: snitch failed: %v", err)
+		return &SnitchError{NodeID: nodeID, Retries: 0, Err: err}
 	}
+
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(snitchRetryInterval * time.Duration(attempt))
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, lastErr = client.Snitch(ctx, &pb.SnitchRequest{NodeId: nodeID})
+		cancel()
+
+		if lastErr == nil {
+			log.Printf("Successfully snitched on node %d (attempt %d)", nodeID, attempt+1)
+			return nil
+		}
+
+		log.Printf("Snitch attempt %d/%d failed for node %d: %v", attempt+1, maxRetries, nodeID, lastErr)
+	}
+
+	return &SnitchError{NodeID: nodeID, Retries: maxRetries, Err: lastErr}
+}
+
+// snitchAsync performs snitch in background, useful for non-critical paths
+func (c *ClusterClient) snitchAsync(nodeID int64) {
+	go func() {
+		if err := c.snitch(nodeID); err != nil {
+			log.Printf("Async snitch failed: %v", err)
+		}
+	}()
 }
 
 func (c *ClusterClient) WriteClient() pb.MessageBoardClient {
@@ -310,7 +485,83 @@ func (c *ClusterClient) TailNodeID() int64 {
 	return c.tailNodeID
 }
 
+// startHealthCheck starts a background goroutine that periodically checks
+// head and tail node health and proactively refreshes state if issues are detected
+func (c *ClusterClient) startHealthCheck() {
+	ctx, cancel := context.WithCancel(context.Background())
+	c.healthCheckCancel = cancel
+
+	go func() {
+		ticker := time.NewTicker(healthCheckInterval)
+		defer ticker.Stop()
+		defer close(c.healthCheckDone)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				c.performHealthCheck()
+			}
+		}
+	}()
+}
+
+// performHealthCheck checks health of head and tail nodes
+func (c *ClusterClient) performHealthCheck() {
+	c.mtx.RLock()
+	headClient := c.headClient
+	tailClient := c.tailClient
+	headNodeID := c.headNodeID
+	tailNodeID := c.tailNodeID
+	c.mtx.RUnlock()
+
+	needsRefresh := false
+
+	// Check head node health
+	if headClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
+		_, err := headClient.ListTopics(ctx, &emptypb.Empty{})
+		cancel()
+		if err != nil {
+			log.Printf("Health check: head node %d unhealthy: %v", headNodeID, err)
+			c.snitchAsync(headNodeID)
+			needsRefresh = true
+		}
+	}
+
+	// Check tail node health
+	if tailClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
+		_, err := tailClient.ListTopics(ctx, &emptypb.Empty{})
+		cancel()
+		if err != nil {
+			log.Printf("Health check: tail node %d unhealthy: %v", tailNodeID, err)
+			c.snitchAsync(tailNodeID)
+			needsRefresh = true
+		}
+	}
+
+	if needsRefresh {
+		log.Printf("Health check triggered cluster state refresh")
+		if err := c.refreshClusterState(); err != nil {
+			log.Printf("Health check: failed to refresh cluster state: %v", err)
+		}
+	}
+}
+
+// stopHealthCheck stops the background health check goroutine
+func (c *ClusterClient) stopHealthCheck() {
+	if c.healthCheckCancel != nil {
+		c.healthCheckCancel()
+		<-c.healthCheckDone // Wait for goroutine to finish
+	}
+}
+
 func (c *ClusterClient) Close() {
+	// Stop health check first
+	c.stopHealthCheck()
+
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	if c.headConn != nil {
@@ -593,7 +844,7 @@ func (c *SubscribeCmd) Run(ctx *kong.Context) error {
 	fmt.Printf("Subscribing to topics %v as user %d...\n", topicIDs, c.UserID)
 	fmt.Printf("Connecting to subscription node: %s\n", subNodeResp.Node.Address)
 
-	subConn, err := grpc.NewClient(subNodeResp.Node.Address,
+	subConn, err := grpc.NewClient(normalizeAddress(subNodeResp.Node.Address),
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return fmt.Errorf("connection to subscription node failed: %v", err)

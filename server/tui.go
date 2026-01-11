@@ -86,6 +86,7 @@ func (t *TUI) showMainScreen() {
 		SetSelectable(true, false)
 	t.usersTable.SetBorder(true).SetTitle(" Users ")
 	t.usersTable.SetBackgroundColor(tcell.ColorBlack)
+	t.usersTable.SetSelectedStyle(tcell.StyleDefault.Background(tcell.ColorWhite).Foreground(tcell.ColorBlack))
 
 	// Topics tabela
 	t.topicsTable = tview.NewTable().
@@ -93,6 +94,7 @@ func (t *TUI) showMainScreen() {
 		SetSelectable(true, false)
 	t.topicsTable.SetBorder(true).SetTitle(" Topics ")
 	t.topicsTable.SetBackgroundColor(tcell.ColorBlack)
+	t.topicsTable.SetSelectedStyle(tcell.StyleDefault.Background(tcell.ColorWhite).Foreground(tcell.ColorBlack))
 
 	// Chain info
 	t.chainInfo = tview.NewTextView().
@@ -172,9 +174,18 @@ func (t *TUI) setFocusPanel(p tview.Primitive) {
 	t.topicsTable.SetBorderColor(tcell.ColorWhite)
 	t.chainInfo.SetBorderColor(tcell.ColorWhite)
 	t.logsView.SetBorderColor(tcell.ColorWhite)
+	t.usersTable.SetBorderAttributes(0)
+	t.topicsTable.SetBorderAttributes(0)
+	t.chainInfo.SetBorderAttributes(0)
+	t.logsView.SetBorderAttributes(0)
 
 	if box, ok := p.(interface{ SetBorderColor(tcell.Color) *tview.Box }); ok {
-		box.SetBorderColor(tcell.ColorOrange)
+		box.SetBorderColor(tcell.ColorWhite)
+		if attrBox, ok := p.(interface {
+			SetBorderAttributes(tcell.AttrMask) *tview.Box
+		}); ok {
+			attrBox.SetBorderAttributes(tcell.AttrBold)
+		}
 	}
 	t.app.SetFocus(p)
 }

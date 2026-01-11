@@ -350,6 +350,7 @@ func (t *TUI) showMainScreen() {
 		ShowSecondaryText(false)
 	t.topicsList.SetBorder(true).SetTitle(" Topics (t: new, r: refresh) ")
 	t.topicsList.SetBackgroundColor(tcell.ColorBlack)
+	t.topicsList.SetSelectedStyle(tcell.StyleDefault.Background(tcell.ColorWhite).Foreground(tcell.ColorBlack))
 
 	t.topicsList.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
 		if index < len(t.topics) {
@@ -367,6 +368,7 @@ func (t *TUI) showMainScreen() {
 		ShowSecondaryText(false)
 	t.subscriptionList.SetBorder(true).SetTitle(" Subscriptions (n: new) ")
 	t.subscriptionList.SetBackgroundColor(tcell.ColorBlack)
+	t.subscriptionList.SetSelectedStyle(tcell.StyleDefault.Background(tcell.ColorWhite).Foreground(tcell.ColorBlack))
 
 	t.subscriptionList.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
 		if index < len(t.subscriptions) {
@@ -539,9 +541,16 @@ func (t *TUI) setFocusPanel(p tview.Primitive) {
 	t.subscriptionList.SetBorderColor(tcell.ColorWhite)
 	t.messagesList.SetBorderColor(tcell.ColorWhite)
 	t.inputField.SetBorderColor(tcell.ColorWhite)
+	t.topicsList.SetBorderAttributes(0)
+	t.subscriptionList.SetBorderAttributes(0)
+	t.messagesList.SetBorderAttributes(0)
+	t.inputField.SetBorderAttributes(0)
 
 	if box, ok := p.(interface{ SetBorderColor(tcell.Color) *tview.Box }); ok {
-		box.SetBorderColor(tcell.ColorOrange)
+		box.SetBorderColor(tcell.ColorWhite)
+		if attrBox, ok := p.(interface{ SetBorderAttributes(tcell.AttrMask) *tview.Box }); ok {
+			attrBox.SetBorderAttributes(tcell.AttrBold)
+		}
 	}
 	t.app.SetFocus(p)
 }

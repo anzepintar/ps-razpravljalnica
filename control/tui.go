@@ -68,6 +68,7 @@ func (t *TUI) showMainScreen() {
 		SetSelectable(true, false)
 	t.nodesTable.SetBorder(true).SetTitle(" Data Plane Nodes (Chain) ")
 	t.nodesTable.SetBackgroundColor(tcell.ColorBlack)
+	t.nodesTable.SetSelectedStyle(tcell.StyleDefault.Background(tcell.ColorWhite).Foreground(tcell.ColorBlack))
 
 	// Raft info
 	t.raftInfo = tview.NewTextView().
@@ -137,9 +138,15 @@ func (t *TUI) setFocusPanel(p tview.Primitive) {
 	t.nodesTable.SetBorderColor(tcell.ColorWhite)
 	t.raftInfo.SetBorderColor(tcell.ColorWhite)
 	t.logsView.SetBorderColor(tcell.ColorWhite)
+	t.nodesTable.SetBorderAttributes(0)
+	t.raftInfo.SetBorderAttributes(0)
+	t.logsView.SetBorderAttributes(0)
 
 	if box, ok := p.(interface{ SetBorderColor(tcell.Color) *tview.Box }); ok {
-		box.SetBorderColor(tcell.ColorOrange)
+		box.SetBorderColor(tcell.ColorWhite)
+		if attrBox, ok := p.(interface{ SetBorderAttributes(tcell.AttrMask) *tview.Box }); ok {
+			attrBox.SetBorderAttributes(tcell.AttrBold)
+		}
 	}
 	t.app.SetFocus(p)
 }
@@ -214,7 +221,7 @@ func (t *TUI) updateRaftInfo() {
 	case raft.Follower:
 		stateColor = "blue"
 	case raft.Candidate:
-		stateColor = "orange"
+		stateColor = "yellow"
 	}
 
 	sb.WriteString(fmt.Sprintf("[yellow]State:[white] [%s]%s[white]\n", stateColor, state.String()))

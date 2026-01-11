@@ -117,3 +117,12 @@ Argumenti:
 - **Reads** (ListTopics, GetMessages, GetUser) → TAIL
 - Če karkoli faila → client snitcha kontrolni ravnini
 - **Subscriptions** -> 50% možnosti entry point, 50% da naprej, če pride to repa vzame rep.
+
+
+
+TODO:
+
+- subscription se sesuje, če ugasneš strežnik na katerem je subscription - trenutno se client sesuje
+- trenutno subscription omogoča pisanje - trenutno piše v temo 0
+- testiranje clienta v primeru da preneha delovati entry point - trenutno se sesuje
+- če odstraniš raft leaderja, ali potem kdo drug postane leader - trenutno se mi zdi, da ostane isti raft leader (prevote denied, kljub temu, da leader ne obstaja več)?

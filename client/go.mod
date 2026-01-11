@@ -3,9 +3,11 @@ module github.com/anzepintar/ps-razpravljalnica/client
 go 1.25
 
 require (
+	github.com/Jille/grpc-multi-resolver v1.3.0
 	github.com/Jille/raft-grpc-leader-rpc v1.1.0
 	github.com/alecthomas/kong v1.13.0
 	github.com/gdamore/tcell/v2 v2.13.6
+	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0
 	github.com/rivo/tview v0.42.0
 	google.golang.org/grpc v1.77.0
 	google.golang.org/protobuf v1.36.10

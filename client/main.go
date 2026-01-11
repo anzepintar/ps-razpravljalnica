@@ -12,12 +12,15 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
+	grpc_retry "github.com/grpc-ecosystem/go-grpc-middleware/retry"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	pb "github.com/anzepintar/ps-razpravljalnica/client/razpravljalnica"
 
+	_ "github.com/Jille/grpc-multi-resolver"
 	_ "github.com/Jille/raft-grpc-leader-rpc/leaderhealth"
 	_ "google.golang.org/grpc/health"
 )
@@ -137,10 +140,12 @@ type ClusterClient struct {
 
 	// Data plane nodes
 	headAddr   string
+	headNodeID int64
 	headConn   *grpc.ClientConn
 	headClient pb.MessageBoardClient
 
 	tailAddr   string
+	tailNodeID int64
 	tailConn   *grpc.ClientConn
 	tailClient pb.MessageBoardClient
 }
@@ -189,14 +194,22 @@ func (c *ClusterClient) refreshClusterState() error {
 		if c.controlConn != nil {
 			c.controlConn.Close()
 		}
+		// Retry options for control plane calls (leader might change)
+		retryOpts := []grpc_retry.CallOption{
+			grpc_retry.WithBackoff(grpc_retry.BackoffExponential(100 * time.Millisecond)),
+			grpc_retry.WithMax(5),
+			grpc_retry.WithCodes(codes.Unavailable, codes.ResourceExhausted),
+		}
 		c.controlConn, err = grpc.NewClient(multiAddr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithDefaultServiceConfig(`{"healthCheckConfig": {"serviceName": ""}}`),
+			grpc.WithUnaryInterceptor(grpc_retry.UnaryClientInterceptor(retryOpts...)),
 		)
 		if err != nil {
 			log.Printf("Warning: could not create multi-resolver connection: %v", err)
 			c.controlConn, err = grpc.NewClient(c.controlAddrs[0],
-				grpc.WithTransportCredentials(insecure.NewCredentials()))
+				grpc.WithTransportCredentials(insecure.NewCredentials()),
+				grpc.WithUnaryInterceptor(grpc_retry.UnaryClientInterceptor(retryOpts...)))
 			if err != nil {
 				return fmt.Errorf("failed to connect to control plane: %v", err)
 			}
@@ -211,6 +224,7 @@ func (c *ClusterClient) refreshClusterState() error {
 		}
 		if c.headAddr != state.Head.Address {
 			c.headAddr = state.Head.Address
+			c.headNodeID = state.Head.NodeId
 			c.headConn, err = grpc.NewClient(c.headAddr,
 				grpc.WithTransportCredentials(insecure.NewCredentials()))
 			if err != nil {
@@ -227,6 +241,7 @@ func (c *ClusterClient) refreshClusterState() error {
 		}
 		if c.tailAddr != state.Tail.Address {
 			c.tailAddr = state.Tail.Address
+			c.tailNodeID = state.Tail.NodeId
 			c.tailConn, err = grpc.NewClient(c.tailAddr,
 				grpc.WithTransportCredentials(insecure.NewCredentials()))
 			if err != nil {
@@ -239,24 +254,23 @@ func (c *ClusterClient) refreshClusterState() error {
 	return nil
 }
 
-func (c *ClusterClient) snitch(nodeAddr string) {
+func (c *ClusterClient) snitch(nodeID int64) {
 	c.mtx.RLock()
-	defer c.mtx.RUnlock()
+	client := c.controlClient
+	c.mtx.RUnlock()
 
-	// Najde node id, in snitcha na control pane
-	for _, addr := range c.controlAddrs {
-		conn, err := grpc.NewClient(addr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if err != nil {
-			continue
-		}
-		client := pb.NewControlPlaneClient(conn)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		// osvežitev
-		_, _ = client.GetClusterStateClient(ctx, &emptypb.Empty{})
-		cancel()
-		conn.Close()
-		break
+	if client == nil {
+		log.Printf("Warning: no control plane client available to snitch")
+		return
+	}
+
+	// Report the failed node to control plane
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := client.Snitch(ctx, &pb.SnitchRequest{NodeId: nodeID})
+	if err != nil {
+		log.Printf("Warning: snitch failed: %v", err)
 	}
 }
 
@@ -278,10 +292,22 @@ func (c *ClusterClient) HeadAddr() string {
 	return c.headAddr
 }
 
+func (c *ClusterClient) HeadNodeID() int64 {
+	c.mtx.RLock()
+	defer c.mtx.RUnlock()
+	return c.headNodeID
+}
+
 func (c *ClusterClient) TailAddr() string {
 	c.mtx.RLock()
 	defer c.mtx.RUnlock()
 	return c.tailAddr
+}
+
+func (c *ClusterClient) TailNodeID() int64 {
+	c.mtx.RLock()
+	defer c.mtx.RUnlock()
+	return c.tailNodeID
 }
 
 func (c *ClusterClient) Close() {
@@ -325,7 +351,7 @@ func (c *CreateUserCmd) Run(ctx *kong.Context) error {
 
 	resp, err := client.CreateUser(reqCtx, &pb.CreateUserRequest{Name: c.Name})
 	if err != nil {
-		cluster.snitch(cluster.HeadAddr())
+		cluster.snitch(cluster.HeadNodeID())
 		cluster.refreshClusterState()
 		return fmt.Errorf("error creating user: %v", err)
 	}
@@ -349,7 +375,7 @@ func (c *CreateTopicCmd) Run(ctx *kong.Context) error {
 
 	resp, err := client.CreateTopic(reqCtx, &pb.CreateTopicRequest{Name: c.Name})
 	if err != nil {
-		cluster.snitch(cluster.HeadAddr())
+		cluster.snitch(cluster.HeadNodeID())
 		cluster.refreshClusterState()
 		return fmt.Errorf("error creating topic: %v", err)
 	}
@@ -377,7 +403,7 @@ func (c *PostMessageCmd) Run(ctx *kong.Context) error {
 		Text:    c.Text,
 	})
 	if err != nil {
-		cluster.snitch(cluster.HeadAddr())
+		cluster.snitch(cluster.HeadNodeID())
 		cluster.refreshClusterState()
 		return fmt.Errorf("error posting message: %v", err)
 	}
@@ -406,7 +432,7 @@ func (c *UpdateMsgCmd) Run(ctx *kong.Context) error {
 		Text:      c.Text,
 	})
 	if err != nil {
-		cluster.snitch(cluster.HeadAddr())
+		cluster.snitch(cluster.HeadNodeID())
 		cluster.refreshClusterState()
 		return fmt.Errorf("error updating message: %v", err)
 	}
@@ -434,7 +460,7 @@ func (c *DeleteMsgCmd) Run(ctx *kong.Context) error {
 		UserId:    c.UserID,
 	})
 	if err != nil {
-		cluster.snitch(cluster.HeadAddr())
+		cluster.snitch(cluster.HeadNodeID())
 		cluster.refreshClusterState()
 		return fmt.Errorf("error deleting message: %v", err)
 	}
@@ -462,7 +488,7 @@ func (c *LikeMsgCmd) Run(ctx *kong.Context) error {
 		UserId:    c.UserID,
 	})
 	if err != nil {
-		cluster.snitch(cluster.HeadAddr())
+		cluster.snitch(cluster.HeadNodeID())
 		cluster.refreshClusterState()
 		return fmt.Errorf("error liking message: %v", err)
 	}
@@ -486,7 +512,7 @@ func (c *ListTopicsCmd) Run(ctx *kong.Context) error {
 
 	resp, err := client.ListTopics(reqCtx, &emptypb.Empty{})
 	if err != nil {
-		cluster.snitch(cluster.TailAddr())
+		cluster.snitch(cluster.TailNodeID())
 		cluster.refreshClusterState()
 		return fmt.Errorf("error retrieving topics: %v", err)
 	}
@@ -517,7 +543,7 @@ func (c *GetMessagesCmd) Run(ctx *kong.Context) error {
 		Limit:         int32(c.Limit),
 	})
 	if err != nil {
-		cluster.snitch(cluster.TailAddr())
+		cluster.snitch(cluster.TailNodeID())
 		cluster.refreshClusterState()
 		return fmt.Errorf("error retrieving messages: %v", err)
 	}
@@ -559,7 +585,7 @@ func (c *SubscribeCmd) Run(ctx *kong.Context) error {
 		TopicId: topicIDs,
 	})
 	if err != nil {
-		cluster.snitch(cluster.HeadAddr())
+		cluster.snitch(cluster.HeadNodeID())
 		cluster.refreshClusterState()
 		return fmt.Errorf("error getting subscription node: %v", err)
 	}

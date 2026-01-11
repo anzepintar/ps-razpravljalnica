@@ -127,7 +127,7 @@ func (t *TUI) showLoginScreen() {
 		}
 		user, err := client.CreateUser(ctx, &pb.CreateUserRequest{Name: username})
 		if err != nil {
-			t.cluster.snitch(t.cluster.HeadAddr())
+			t.cluster.snitch(t.cluster.HeadNodeID())
 			t.cluster.refreshClusterState()
 			t.showError(fmt.Sprintf("Failed to create user: %v", err))
 			return
@@ -159,7 +159,7 @@ func (t *TUI) showLoginScreen() {
 		}
 		user, err := client.GetUser(ctx, &pb.GetUserRequest{UserId: id})
 		if err != nil {
-			t.cluster.snitch(t.cluster.TailAddr())
+			t.cluster.snitch(t.cluster.TailNodeID())
 			t.cluster.refreshClusterState()
 			t.showError(fmt.Sprintf("User not found: %v", err))
 			return
@@ -349,7 +349,7 @@ func (t *TUI) loadTopics() {
 
 	resp, err := client.ListTopics(ctx, &emptypb.Empty{})
 	if err != nil {
-		t.cluster.snitch(t.cluster.TailAddr())
+		t.cluster.snitch(t.cluster.TailNodeID())
 		t.cluster.refreshClusterState()
 		t.showError(fmt.Sprintf("Failed to load topics: %v", err))
 		return
@@ -382,7 +382,7 @@ func (t *TUI) loadMessages() {
 		Limit:         100,
 	})
 	if err != nil {
-		t.cluster.snitch(t.cluster.TailAddr())
+		t.cluster.snitch(t.cluster.TailNodeID())
 		t.cluster.refreshClusterState()
 		t.showError(fmt.Sprintf("Failed to load messages: %v", err))
 		return
@@ -449,7 +449,7 @@ func (t *TUI) sendMessage() {
 		Text:    text,
 	})
 	if err != nil {
-		t.cluster.snitch(t.cluster.HeadAddr())
+		t.cluster.snitch(t.cluster.HeadNodeID())
 		t.cluster.refreshClusterState()
 		t.showError(fmt.Sprintf("Failed to send message: %v", err))
 		return
@@ -482,7 +482,7 @@ func (t *TUI) showNewTopicDialog() {
 
 		_, err := client.CreateTopic(ctx, &pb.CreateTopicRequest{Name: topicName})
 		if err != nil {
-			t.cluster.snitch(t.cluster.HeadAddr())
+			t.cluster.snitch(t.cluster.HeadNodeID())
 			t.cluster.refreshClusterState()
 			t.showError(fmt.Sprintf("Failed to create topic: %v", err))
 			return
@@ -537,7 +537,7 @@ func (t *TUI) showLikeDialog() {
 			UserId:    t.currentUserID,
 		})
 		if err != nil {
-			t.cluster.snitch(t.cluster.HeadAddr())
+			t.cluster.snitch(t.cluster.HeadNodeID())
 			t.cluster.refreshClusterState()
 			t.showError(fmt.Sprintf("Failed to like message: %v", err))
 			return
@@ -592,7 +592,7 @@ func (t *TUI) showDeleteDialog() {
 			UserId:    t.currentUserID,
 		})
 		if err != nil {
-			t.cluster.snitch(t.cluster.HeadAddr())
+			t.cluster.snitch(t.cluster.HeadNodeID())
 			t.cluster.refreshClusterState()
 			t.showError(fmt.Sprintf("Failed to delete message: %v", err))
 			return
@@ -652,7 +652,7 @@ func (t *TUI) showEditDialog() {
 			Text:      newText,
 		})
 		if err != nil {
-			t.cluster.snitch(t.cluster.HeadAddr())
+			t.cluster.snitch(t.cluster.HeadNodeID())
 			t.cluster.refreshClusterState()
 			t.showError(fmt.Sprintf("Failed to update message: %v", err))
 			return
@@ -711,7 +711,7 @@ func (t *TUI) startSubscription() {
 	cancel()
 
 	if err != nil {
-		t.cluster.snitch(t.cluster.HeadAddr())
+		t.cluster.snitch(t.cluster.HeadNodeID())
 		t.cluster.refreshClusterState()
 		return
 	}

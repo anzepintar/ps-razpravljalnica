@@ -656,7 +656,6 @@ func (s *MessageBoardServer) SubscribeTopic(req *rpb.SubscribeTopicRequest, stre
 		return status.Error(codes.PermissionDenied, "Topic sets differ.")
 	}
 
-	// v.ch je bil vedno nil
 	sub.ch = make(chan MessageEv)
 	func() {
 		s.subs_mtx.Lock()

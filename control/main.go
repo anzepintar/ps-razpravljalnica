@@ -40,11 +40,10 @@ func main() {
 var grpc_security_opt = grpc.WithTransportCredentials(insecure.NewCredentials())
 
 type RunControlCmd struct {
-	BindAddr      string   `arg:"" help:"binds to this address"`
-	RaftID        string   `arg:"" help:"ID used by raft protocol"`
-	OtherMembers  []string `arg:"" optional:"" help:"other control server addresses"`
-	BootstrapRaft bool     `help:"Whether to bootstrap the Raft cluster"`
-	Tui           bool     `short:"t" help:"enable tui"`
+	BindAddr      string `arg:"" help:"binds to this address"`
+	RaftID        string `arg:"" help:"ID used by raft protocol"`
+	BootstrapRaft bool   `help:"Whether to bootstrap the Raft cluster"`
+	Tui           bool   `short:"t" help:"enable tui"`
 }
 
 var cntsrv = ControlPlaneServer{}

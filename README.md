@@ -12,9 +12,10 @@ protoc --go_out=./control --go-grpc_out=./control razpravljalnica.proto
 
 ```bash
 mkdir -p out
+rm runtime -r
+go build -C control -o ../out/control .
 go build -C server -o ../out/server .
 go build -C client -o ../out/client .
-go build -C control -o ../out/control .
 ```
 
 ## Testiranje
@@ -122,7 +123,5 @@ Argumenti:
 
 TODO:
 
-- subscription se sesuje, če ugasneš strežnik na katerem je subscription - trenutno se client sesuje
-- trenutno subscription omogoča pisanje - trenutno piše v temo 0
-- testiranje clienta v primeru da preneha delovati entry point - trenutno se sesuje
 - če odstraniš raft leaderja, ali potem kdo drug postane leader - trenutno se mi zdi, da ostane isti raft leader (prevote denied, kljub temu, da leader ne obstaja več)?
+- primeri uporabe

@@ -251,14 +251,28 @@ func NewClusterClient(entryPoint string) (*ClusterClient, error) {
 		healthCheckDone: make(chan struct{}),
 	}
 
-	if err := c.refreshClusterState(); err != nil {
-		return nil, err
+	// Try to connect with retries
+	const maxRetries = 3
+	backoff := time.Second
+	var lastErr error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			logMessage("Retrying connection to entry point (attempt %d/%d)...", attempt+1, maxRetries)
+			time.Sleep(backoff)
+			backoff = min(backoff*2, 8*time.Second)
+		}
+
+		if err := c.refreshClusterState(); err != nil {
+			lastErr = err
+			continue
+		}
+		// Success - start health check and return
+		c.startHealthCheck()
+		return c, nil
 	}
 
-	// Start background health checking
-	c.startHealthCheck()
-
-	return c, nil
+	return nil, fmt.Errorf("failed to connect to cluster after %d attempts: %v", maxRetries, lastErr)
 }
 
 func (c *ClusterClient) refreshClusterState() error {
@@ -277,35 +291,59 @@ func normalizeAddress(addr string) string {
 }
 
 func (c *ClusterClient) refreshClusterStateLocked() error {
-	// najprej povezava na vhodni node
-	target := normalizeAddress(c.entryPoint)
-	conn, err := grpc.NewClient(target,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithKeepaliveParams(c.keepaliveParams))
-	if err != nil {
-		// Try to use cached state for graceful degradation
-		if c.cachedState != nil && c.cachedState.IsValid() {
-			logMessage("Warning: failed to connect to entry point, using cached state (age: %v)",
-				time.Since(c.cachedState.CachedAt))
-			return nil
+	// Collect addresses to try: entry point first, then cached control addresses
+	addressesToTry := []string{c.entryPoint}
+	if c.cachedState != nil && len(c.cachedState.ControlAddrs) > 0 {
+		for _, addr := range c.cachedState.ControlAddrs {
+			if addr != c.entryPoint {
+				addressesToTry = append(addressesToTry, addr)
+			}
 		}
-		return fmt.Errorf("failed to connect to entry point %s: %v", c.entryPoint, err)
 	}
 
-	client := pb.NewControlPlaneClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	var state *pb.GetClusterStateResponse
+	var lastErr error
+	var successAddr string
 
-	state, err := client.GetClusterStateClient(ctx, &emptypb.Empty{})
-	conn.Close()
-	if err != nil {
-		// Try to use cached state for graceful degradation
+	// Try each address until one works
+	for _, addr := range addressesToTry {
+		target := normalizeAddress(addr)
+		conn, err := grpc.NewClient(target,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithKeepaliveParams(c.keepaliveParams))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		client := pb.NewControlPlaneClient(conn)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		state, err = client.GetClusterStateClient(ctx, &emptypb.Empty{})
+		cancel()
+		conn.Close()
+
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		successAddr = addr
+		break
+	}
+
+	if state == nil {
+		// All addresses failed, try to use cached state for graceful degradation
 		if c.cachedState != nil && c.cachedState.IsValid() {
-			logMessage("Warning: failed to get cluster state, using cached state (age: %v)",
+			logMessage("Warning: all control nodes unreachable, using cached state (age: %v)",
 				time.Since(c.cachedState.CachedAt))
 			return nil
 		}
-		return fmt.Errorf("failed to get cluster state: %v", err)
+		return fmt.Errorf("failed to get cluster state from any control node: %v", lastErr)
+	}
+
+	// Log if we used an alternative address
+	if successAddr != c.entryPoint {
+		logMessage("Connected to alternative control node: %s", successAddr)
 	}
 
 	c.controlAddrs = make([]string, len(state.Servers))
@@ -333,6 +371,7 @@ func (c *ClusterClient) refreshClusterStateLocked() error {
 			grpc_retry.WithCodes(codes.Unavailable, codes.ResourceExhausted),
 		}
 		if c.controlConn == nil {
+			var err error
 			c.controlConn, err = grpc.NewClient(multiAddr,
 				grpc.WithTransportCredentials(insecure.NewCredentials()),
 				grpc.WithDefaultServiceConfig(`{"healthCheckConfig": {"serviceName": ""}}`),
@@ -362,11 +401,12 @@ func (c *ClusterClient) refreshClusterStateLocked() error {
 		if c.headConn == nil || c.headAddr != state.Head.Address {
 			c.headAddr = state.Head.Address
 			c.headNodeID = state.Head.NodeId
-			c.headConn, err = grpc.NewClient(normalizeAddress(c.headAddr),
+			var headErr error
+			c.headConn, headErr = grpc.NewClient(normalizeAddress(c.headAddr),
 				grpc.WithTransportCredentials(insecure.NewCredentials()),
 				grpc.WithKeepaliveParams(c.keepaliveParams))
-			if err != nil {
-				return fmt.Errorf("failed to connect to head %s: %v", c.headAddr, err)
+			if headErr != nil {
+				return fmt.Errorf("failed to connect to head %s: %v", c.headAddr, headErr)
 			}
 			c.headClient = pb.NewMessageBoardClient(c.headConn)
 		}
@@ -381,11 +421,12 @@ func (c *ClusterClient) refreshClusterStateLocked() error {
 		if c.tailConn == nil || c.tailAddr != state.Tail.Address {
 			c.tailAddr = state.Tail.Address
 			c.tailNodeID = state.Tail.NodeId
-			c.tailConn, err = grpc.NewClient(normalizeAddress(c.tailAddr),
+			var tailErr error
+			c.tailConn, tailErr = grpc.NewClient(normalizeAddress(c.tailAddr),
 				grpc.WithTransportCredentials(insecure.NewCredentials()),
 				grpc.WithKeepaliveParams(c.keepaliveParams))
-			if err != nil {
-				return fmt.Errorf("failed to connect to tail %s: %v", c.tailAddr, err)
+			if tailErr != nil {
+				return fmt.Errorf("failed to connect to tail %s: %v", c.tailAddr, tailErr)
 			}
 			c.tailClient = pb.NewMessageBoardClient(c.tailConn)
 		}

@@ -358,6 +358,8 @@ func (t *TUI) showMainScreen() {
 			t.currentSubIndex = -1
 			t.currentTopicID = t.topics[index].Id
 			t.messagesList.SetTitle(fmt.Sprintf(" Messages - %s ", t.topics[index].Name))
+			t.inputField.SetDisabled(false)
+			t.inputField.SetTitle(" Post Message (Enter to send) ")
 			t.loadMessages()
 			t.startSubscription()
 		}
@@ -374,6 +376,8 @@ func (t *TUI) showMainScreen() {
 		if index < len(t.subscriptions) {
 			t.viewingSubscription = true
 			t.currentSubIndex = index
+			t.inputField.SetDisabled(true)
+			t.inputField.SetTitle(" (Select topic to send messages) ")
 			t.renderSubscriptionMessages()
 		}
 	})
@@ -548,7 +552,9 @@ func (t *TUI) setFocusPanel(p tview.Primitive) {
 
 	if box, ok := p.(interface{ SetBorderColor(tcell.Color) *tview.Box }); ok {
 		box.SetBorderColor(tcell.ColorWhite)
-		if attrBox, ok := p.(interface{ SetBorderAttributes(tcell.AttrMask) *tview.Box }); ok {
+		if attrBox, ok := p.(interface {
+			SetBorderAttributes(tcell.AttrMask) *tview.Box
+		}); ok {
 			attrBox.SetBorderAttributes(tcell.AttrBold)
 		}
 	}
@@ -681,6 +687,14 @@ func (t *TUI) renderMessages() {
 func (t *TUI) sendMessage() {
 	text := t.inputField.GetText()
 	if text == "" || t.currentTopicID < 0 {
+		return
+	}
+
+	// Don't allow sending messages when viewing a subscription
+	// because we don't know which topic to send to
+	if t.viewingSubscription {
+		t.tuiLog("[yellow]Cannot send message while viewing subscription - select a topic first")
+		t.showError("Cannot send message while viewing subscription.\nSelect a specific topic to send messages.")
 		return
 	}
 
@@ -991,85 +1005,209 @@ func (t *TUI) startSubscription() {
 		return
 	}
 
-	var subNodeResp *pb.SubscriptionNodeResponse
 	topicID := t.currentTopicID
 	userID := t.currentUserID
-
-	err := t.safeWriteOp("Get subscription node", func(client pb.MessageBoardClient) error {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		var err error
-		subNodeResp, err = client.GetSubscriptionNode(ctx, &pb.SubscriptionNodeRequest{
-			UserId:  userID,
-			TopicId: []int64{topicID},
-		})
-		return err
-	})
-
-	if err != nil {
-		t.tuiLog("[red]Subscription failed: %v", err)
-		return
-	}
-
-	// Check if node info is valid
-	if subNodeResp == nil || subNodeResp.Node == nil || subNodeResp.Node.Address == "" {
-		t.tuiLog("[red]Subscription failed: no valid subscription node")
-		return
-	}
-
-	// poveži se s subscription node
-	subConn, err := grpc.NewClient(normalizeAddress(subNodeResp.Node.Address),
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return
-	}
-
-	subClient := pb.NewMessageBoardClient(subConn)
 
 	subCtx, subCancel := context.WithCancel(context.Background())
 	t.subCancel = subCancel
 
-	stream, err := subClient.SubscribeTopic(subCtx, &pb.SubscribeTopicRequest{
-		TopicId:        []int64{t.currentTopicID},
-		UserId:         t.currentUserID,
-		FromMessageId:  0,
-		SubscribeToken: subNodeResp.SubscribeToken,
-	})
-	if err != nil {
-		subCancel()
-		subConn.Close()
-		return
-	}
+	// Start subscription with reconnection in goroutine
+	go t.subscriptionLoop(subCtx, []int64{topicID}, userID, -1)
+}
 
-	// Listening v ozadju
-	go func() {
-		defer subConn.Close()
-		for {
-			event, err := stream.Recv()
-			if err == io.EOF || err != nil {
+// subscriptionLoop handles subscription with automatic reconnection
+// subIndex is -1 for single-topic subscription, >= 0 for multi-topic subscription
+func (t *TUI) subscriptionLoop(ctx context.Context, topicIDs []int64, userID int64, subIndex int) {
+	// Retry indefinitely until context is cancelled
+	retryCount := 0
+	backoff := time.Second
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Get subscription node
+		var subNodeResp *pb.SubscriptionNodeResponse
+		err := t.safeWriteOp("Get subscription node", func(client pb.MessageBoardClient) error {
+			reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+
+			var err error
+			subNodeResp, err = client.GetSubscriptionNode(reqCtx, &pb.SubscriptionNodeRequest{
+				UserId:  userID,
+				TopicId: topicIDs,
+			})
+			return err
+		})
+
+		if err != nil {
+			if ctx.Err() != nil {
+				return // Context cancelled
+			}
+			t.app.QueueUpdateDraw(func() {
+				t.tuiLog("[yellow]Subscription failed, retrying (%d): %v", retryCount+1, err)
+			})
+			retryCount++
+
+			select {
+			case <-ctx.Done():
 				return
+			case <-time.After(backoff):
+				backoff = min(backoff*2, 16*time.Second)
+				continue
 			}
 
-			t.app.QueueUpdateDraw(func() {
-				t.loadMessages()
-
-				opName := "UPDATE"
-				switch event.Op {
-				case pb.OpType_OP_POST:
-					opName = "NEW"
-				case pb.OpType_OP_LIKE:
-					opName = "LIKE"
-				case pb.OpType_OP_DELETE:
-					opName = "DELETE"
-				}
-				// Log event to log view instead of status bar
-				timestamp := time.Now().Format("15:04:05")
-				fmt.Fprintf(t.logView, "[dim]%s[white] [cyan]Event:[white] %s on msg #%d\n", timestamp, opName, event.Message.Id)
-				t.logView.ScrollToEnd()
-			})
 		}
-	}()
+
+		if subNodeResp == nil || subNodeResp.Node == nil || subNodeResp.Node.Address == "" {
+			t.app.QueueUpdateDraw(func() {
+				t.tuiLog("[red]Subscription failed: no valid subscription node")
+			})
+			return
+		}
+
+		// Connect to subscription node
+		subConn, err := grpc.NewClient(normalizeAddress(subNodeResp.Node.Address),
+			grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.app.QueueUpdateDraw(func() {
+				t.tuiLog("[yellow]Failed to connect to subscription node, retrying (%d): %v", retryCount+1, err)
+			})
+			retryCount++
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+				backoff = min(backoff*2, 16*time.Second)
+				continue
+			}
+		}
+
+		subClient := pb.NewMessageBoardClient(subConn)
+
+		stream, err := subClient.SubscribeTopic(ctx, &pb.SubscribeTopicRequest{
+			TopicId:        topicIDs,
+			UserId:         userID,
+			FromMessageId:  0,
+			SubscribeToken: subNodeResp.SubscribeToken,
+		})
+		if err != nil {
+			subConn.Close()
+			t.app.QueueUpdateDraw(func() {
+				t.tuiLog("[yellow]Failed to start stream, retrying (%d): %v", retryCount+1, err)
+			})
+			retryCount++
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+				backoff = min(backoff*2, 16*time.Second)
+				continue
+			}
+		}
+
+		// Reset retry count on successful connection
+		retryCount = 0
+		backoff = time.Second
+		t.app.QueueUpdateDraw(func() {
+			t.tuiLog("[green]Subscription connected for topics: %v", topicIDs)
+		})
+
+		// Listen for events
+		streamErr := t.handleSubscriptionStream(ctx, stream, subIndex, topicIDs)
+		subConn.Close()
+
+		if streamErr == nil || ctx.Err() != nil {
+			// Normal closure or context cancelled
+			return
+		}
+
+		// Stream error - attempt reconnection
+		t.app.QueueUpdateDraw(func() {
+			t.tuiLog("[yellow]Subscription stream ended, reconnecting (%d): %v", retryCount+1, streamErr)
+		})
+		retryCount++
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+			backoff = min(backoff*2, 16*time.Second)
+		}
+	}
+}
+
+// handleSubscriptionStream processes events from a subscription stream
+// Returns nil on normal closure (EOF), error otherwise
+func (t *TUI) handleSubscriptionStream(ctx context.Context, stream grpc.ServerStreamingClient[pb.MessageEvent], subIndex int, topicIDs []int64) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		event, err := stream.Recv()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		t.app.QueueUpdateDraw(func() {
+			if subIndex < 0 {
+				// Single-topic subscription: just reload messages
+				t.loadMessages()
+			} else if subIndex < len(t.subscriptions) {
+				// Multi-topic subscription: update subscription messages
+				found := false
+				for i, msg := range t.subscriptions[subIndex].Messages {
+					if msg.Id == event.Message.Id {
+						if event.Op == pb.OpType_OP_DELETE {
+							t.subscriptions[subIndex].Messages = append(
+								t.subscriptions[subIndex].Messages[:i],
+								t.subscriptions[subIndex].Messages[i+1:]...)
+						} else {
+							t.subscriptions[subIndex].Messages[i] = event.Message
+						}
+						found = true
+						break
+					}
+				}
+				if !found && event.Op != pb.OpType_OP_DELETE {
+					t.subscriptions[subIndex].Messages = append(t.subscriptions[subIndex].Messages, event.Message)
+				}
+
+				if t.viewingSubscription && t.currentSubIndex == subIndex {
+					t.renderSubscriptionMessages()
+				}
+			}
+
+			opName := "UPDATE"
+			switch event.Op {
+			case pb.OpType_OP_POST:
+				opName = "NEW"
+			case pb.OpType_OP_LIKE:
+				opName = "LIKE"
+			case pb.OpType_OP_DELETE:
+				opName = "DELETE"
+			}
+			timestamp := time.Now().Format("15:04:05")
+			if subIndex < 0 {
+				fmt.Fprintf(t.logView, "[dim]%s[white] [cyan]Event:[white] %s on msg #%d\n", timestamp, opName, event.Message.Id)
+			} else {
+				fmt.Fprintf(t.logView, "[dim]%s[white] [cyan]Sub Event:[white] %s on msg #%d (topic %d)\n",
+					timestamp, opName, event.Message.Id, event.Message.TopicId)
+			}
+			t.logView.ScrollToEnd()
+		})
+	}
 }
 
 // showNewSubscriptionDialog prikaže dialog za ustvarjanje nove naročnine
@@ -1270,114 +1408,12 @@ func (t *TUI) startMultiTopicSubscription(subIndex int) {
 	}
 
 	sub := &t.subscriptions[subIndex]
-
-	// Pridobi subscription node
-	var subNodeResp *pb.SubscriptionNodeResponse
 	topicIDs := sub.TopicIDs
 	userID := t.currentUserID
-
-	err := t.safeWriteOp("Get subscription node", func(client pb.MessageBoardClient) error {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		var err error
-		subNodeResp, err = client.GetSubscriptionNode(ctx, &pb.SubscriptionNodeRequest{
-			UserId:  userID,
-			TopicId: topicIDs,
-		})
-		return err
-	})
-
-	if err != nil {
-		t.tuiLog("[red]Multi-topic subscription failed: %v", err)
-		return
-	}
-
-	if subNodeResp == nil || subNodeResp.Node == nil || subNodeResp.Node.Address == "" {
-		t.tuiLog("[red]Multi-topic subscription failed: no valid subscription node")
-		return
-	}
-
-	// Poveži se s subscription node
-	subConn, err := grpc.NewClient(normalizeAddress(subNodeResp.Node.Address),
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.tuiLog("[red]Failed to connect to subscription node: %v", err)
-		return
-	}
-
-	subClient := pb.NewMessageBoardClient(subConn)
 
 	subCtx, subCancel := context.WithCancel(context.Background())
 	sub.Cancel = subCancel
 
-	stream, err := subClient.SubscribeTopic(subCtx, &pb.SubscribeTopicRequest{
-		TopicId:        topicIDs,
-		UserId:         userID,
-		FromMessageId:  0,
-		SubscribeToken: subNodeResp.SubscribeToken,
-	})
-	if err != nil {
-		subCancel()
-		subConn.Close()
-		t.tuiLog("[red]Failed to subscribe to topics: %v", err)
-		return
-	}
-
-	t.tuiLog("[green]Started subscription for topics: %v", topicIDs)
-
-	// Poslušaj v ozadju
-	go func() {
-		defer subConn.Close()
-		for {
-			event, err := stream.Recv()
-			if err == io.EOF || err != nil {
-				return
-			}
-
-			t.app.QueueUpdateDraw(func() {
-				// Dodaj sporočilo v naročnino
-				if subIndex < len(t.subscriptions) {
-					// Preveri, ali sporočilo že obstaja, in ga posodobi ali dodaj
-					found := false
-					for i, msg := range t.subscriptions[subIndex].Messages {
-						if msg.Id == event.Message.Id {
-							if event.Op == pb.OpType_OP_DELETE {
-								// Odstrani sporočilo
-								t.subscriptions[subIndex].Messages = append(
-									t.subscriptions[subIndex].Messages[:i],
-									t.subscriptions[subIndex].Messages[i+1:]...)
-							} else {
-								t.subscriptions[subIndex].Messages[i] = event.Message
-							}
-							found = true
-							break
-						}
-					}
-					if !found && event.Op != pb.OpType_OP_DELETE {
-						t.subscriptions[subIndex].Messages = append(t.subscriptions[subIndex].Messages, event.Message)
-					}
-
-					// Če gledamo to naročnino, osveži prikaz
-					if t.viewingSubscription && t.currentSubIndex == subIndex {
-						t.renderSubscriptionMessages()
-					}
-				}
-
-				opName := "UPDATE"
-				switch event.Op {
-				case pb.OpType_OP_POST:
-					opName = "NEW"
-				case pb.OpType_OP_LIKE:
-					opName = "LIKE"
-				case pb.OpType_OP_DELETE:
-					opName = "DELETE"
-				}
-				timestamp := time.Now().Format("15:04:05")
-				fmt.Fprintf(t.logView, "[dim]%s[white] [cyan]Sub Event:[white] %s on msg #%d (topic %d)\n",
-					timestamp, opName, event.Message.Id, event.Message.TopicId)
-				t.logView.ScrollToEnd()
-			})
-		}
-	}()
+	// Use the shared subscription loop with reconnection support
+	go t.subscriptionLoop(subCtx, topicIDs, userID, subIndex)
 }

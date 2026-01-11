@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/alecthomas/kong"
 
@@ -83,6 +84,7 @@ func (s *RunNodeCmd) Run() error {
 		if err := srv.Serve(lis); err != nil {
 			return fmt.Errorf("failed to serve: %v", err)
 		}
+		time.Sleep(time.Second)
 	}
 	return nil
 }

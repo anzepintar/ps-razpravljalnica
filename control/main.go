@@ -246,7 +246,9 @@ func (s *ControlPlaneServer) Register(ctx context.Context, req *rpb.RegisterRequ
 	return &rpb.NodeInfo{NodeId: node.id, Address: node.address}, nil
 }
 func (s *ControlPlaneServer) Snitch(ctx context.Context, req *rpb.SnitchRequest) (*emptypb.Empty, error) {
-	go s.removeNode(req.NodeId, true)
+	if err := s.removeNode(req.NodeId, true); err != nil {
+		return nil, err
+	}
 	return &emptypb.Empty{}, nil
 }
 
@@ -269,14 +271,14 @@ func (s *ControlPlaneServer) sendUpdate(id int64) {
 
 	conn, err := grpc.NewClient(v.address, grpc_security_opt)
 	if err != nil {
-		go s.removeNode(id, true)
+		s.removeNode(id, true)
 		return
 	}
 	defer conn.Close()
 	client := rpb.NewControlledPlaneClient(conn)
 	_, err = client.ChainChange(context.Background(), &emptypb.Empty{})
 	if err != nil {
-		go s.removeNode(id, true)
+		s.removeNode(id, true)
 		return
 	}
 }
@@ -292,7 +294,7 @@ func (s *ControlPlaneServer) idToNode(id int64) *Node {
 	return &node
 }
 
-func (s *ControlPlaneServer) removeNode(id int64, shutdown bool) {
+func (s *ControlPlaneServer) removeNode(id int64, shutdown bool) error {
 	if shutdown {
 		node := s.idToNode(id)
 		if node != nil {
@@ -303,12 +305,10 @@ func (s *ControlPlaneServer) removeNode(id int64, shutdown bool) {
 	req = strconv.AppendInt(req, id, 10)
 	f := s.raft.Apply(req, time.Second)
 	if err := f.Error(); err != nil {
-		if status.Code(err) == codes.Unavailable {
-			go s.removeNode(id, shutdown)
-		}
-		return
+		return err
 	}
 	_ = f.Response()
+	return nil
 }
 
 func sendShutdown(addr string) {
@@ -330,7 +330,8 @@ func (s *ControlPlaneServer) Apply(l *raft.Log) any {
 	req := l.Data
 	op := req[0]
 
-	if op == '+' {
+	switch op {
+	case '+':
 		addr := string(req[1:])
 		if idx := slices.IndexFunc(s.Nodes, func(e Node) bool { return e.address == addr }); idx != -1 {
 			return &s.Nodes[idx]
@@ -344,7 +345,7 @@ func (s *ControlPlaneServer) Apply(l *raft.Log) any {
 			go s.sendUpdate(s.Nodes[len(s.Nodes)-2].id)
 		}
 		return &new_node
-	} else if op == '-' {
+	case '-':
 		id_str := req[1:]
 		id, err := strconv.ParseInt(string(id_str), 10, 10)
 		if err != nil {

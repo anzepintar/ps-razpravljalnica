@@ -27,7 +27,6 @@ type TUI struct {
 	currentUserID   int64
 	currentUserName string
 
-	// Elementi prikaza
 	statusBar        *tview.TextView
 	logView          *tview.TextView
 	topicsList       *tview.List
@@ -152,7 +151,6 @@ func (t *TUI) readClient() pb.MessageBoardClient {
 	return t.cluster.ReadClient()
 }
 
-// refreshAndGetWriteClient refreshes cluster state and returns write client
 func (t *TUI) refreshAndGetWriteClient() pb.MessageBoardClient {
 	t.tuiLog("[yellow]Refreshing cluster state...")
 	if err := t.cluster.refreshClusterState(); err != nil {
@@ -165,7 +163,6 @@ func (t *TUI) refreshAndGetWriteClient() pb.MessageBoardClient {
 	return t.cluster.WriteClient()
 }
 
-// refreshAndGetReadClient refreshes cluster state and returns read client
 func (t *TUI) refreshAndGetReadClient() pb.MessageBoardClient {
 	t.tuiLog("[yellow]Refreshing cluster state...")
 	if err := t.cluster.refreshClusterState(); err != nil {
@@ -178,8 +175,9 @@ func (t *TUI) refreshAndGetReadClient() pb.MessageBoardClient {
 	return t.cluster.ReadClient()
 }
 
-// safeWriteOp executes a write operation with automatic retry on failure
+// avtomatsko poskusi če faila
 func (t *TUI) safeWriteOp(opName string, op func(client pb.MessageBoardClient) error) error {
+	defer traceRoutine(fmt.Sprintf("safeWriteOp(%s)", opName))()
 	client := t.writeClient()
 	if client == nil {
 		client = t.refreshAndGetWriteClient()
@@ -193,7 +191,6 @@ func (t *TUI) safeWriteOp(opName string, op func(client pb.MessageBoardClient) e
 		t.tuiLog("[yellow]%s failed, trying to recover: %v", opName, err)
 		t.cluster.snitchAsync(t.cluster.HeadNodeID())
 
-		// Try to refresh and retry once
 		client = t.refreshAndGetWriteClient()
 		if client == nil {
 			return fmt.Errorf("no head node available after refresh")
@@ -210,6 +207,7 @@ func (t *TUI) safeWriteOp(opName string, op func(client pb.MessageBoardClient) e
 
 // safeReadOp executes a read operation with automatic retry on failure
 func (t *TUI) safeReadOp(opName string, op func(client pb.MessageBoardClient) error) error {
+	defer traceRoutine(fmt.Sprintf("safeReadOp(%s)", opName))()
 	client := t.readClient()
 	if client == nil {
 		client = t.refreshAndGetReadClient()
@@ -270,25 +268,29 @@ func (t *TUI) showLoginScreen() {
 			return
 		}
 
-		var user *pb.User
-		err := t.safeWriteOp("Create user", func(client pb.MessageBoardClient) error {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
+		go func() {
+			var user *pb.User
+			err := t.safeWriteOp("Create user", func(client pb.MessageBoardClient) error {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
 
-			var err error
-			user, err = client.CreateUser(ctx, &pb.CreateUserRequest{Name: username})
-			return err
-		})
+				var err error
+				user, err = client.CreateUser(ctx, &pb.CreateUserRequest{Name: username})
+				return err
+			})
 
-		if err != nil {
-			t.tuiLog("[red]Failed to create user: %v", err)
-			t.showError(fmt.Sprintf("Failed to create user: %v", err))
-			return
-		}
-		t.currentUserID = user.Id
-		t.currentUserName = user.Name
-		t.updateStatusBar()
-		t.showMainScreen()
+			t.app.QueueUpdateDraw(func() {
+				if err != nil {
+					t.tuiLog("[red]Failed to create user: %v", err)
+					t.showError(fmt.Sprintf("Failed to create user: %v", err))
+					return
+				}
+				t.currentUserID = user.Id
+				t.currentUserName = user.Name
+				t.updateStatusBar()
+				t.showMainScreen()
+			})
+		}()
 	})
 	form.AddButton("Login with ID", func() {
 		if userIDStr == "" {
@@ -301,25 +303,29 @@ func (t *TUI) showLoginScreen() {
 			return
 		}
 
-		var user *pb.User
-		err = t.safeReadOp("Get user", func(client pb.MessageBoardClient) error {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
+		go func() {
+			var user *pb.User
+			err = t.safeReadOp("Get user", func(client pb.MessageBoardClient) error {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
 
-			var err error
-			user, err = client.GetUser(ctx, &pb.GetUserRequest{UserId: id})
-			return err
-		})
+				var err error
+				user, err = client.GetUser(ctx, &pb.GetUserRequest{UserId: id})
+				return err
+			})
 
-		if err != nil {
-			t.tuiLog("[red]User not found: %v", err)
-			t.showError(fmt.Sprintf("User not found: %v", err))
-			return
-		}
-		t.currentUserID = user.Id
-		t.currentUserName = user.Name
-		t.updateStatusBar()
-		t.showMainScreen()
+			t.app.QueueUpdateDraw(func() {
+				if err != nil {
+					t.tuiLog("[red]User not found: %v", err)
+					t.showError(fmt.Sprintf("User not found: %v", err))
+					return
+				}
+				t.currentUserID = user.Id
+				t.currentUserName = user.Name
+				t.updateStatusBar()
+				t.showMainScreen()
+			})
+		}()
 	})
 	form.AddButton("Quit", func() {
 		t.cleanup()
@@ -576,6 +582,7 @@ func (t *TUI) startStateRefresh() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				traceRoutine("stateRefreshLoop:Ticker")()
 				if err := t.cluster.refreshClusterState(); err == nil {
 					t.app.QueueUpdateDraw(func() {
 						t.updateStatusBar()
@@ -594,28 +601,47 @@ func (t *TUI) updateStatusBar() {
 }
 
 func (t *TUI) loadTopics() {
-	var resp *pb.ListTopicsResponse
-
-	err := t.safeReadOp("Load topics", func(client pb.MessageBoardClient) error {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		var err error
-		resp, err = client.ListTopics(ctx, &emptypb.Empty{})
-		return err
-	})
-
-	if err != nil {
-		t.tuiLog("[red]Failed to load topics: %v", err)
-		t.showError(fmt.Sprintf("Failed to load topics: %v", err))
-		return
+	// Pokaži loading stanje če je seznam prazen
+	if t.topicsList.GetItemCount() == 0 {
+		t.topicsList.SetTitle(" Topics (Loading...) ")
 	}
 
-	t.topics = resp.Topics
-	t.topicsList.Clear()
-	for _, topic := range t.topics {
-		t.topicsList.AddItem(fmt.Sprintf("[%d] %s", topic.Id, topic.Name), "", 0, nil)
-	}
+	go func() {
+		defer traceRoutine("loadTopics")()
+		var resp *pb.ListTopicsResponse
+
+		err := t.safeReadOp("Load topics", func(client pb.MessageBoardClient) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			var err error
+			resp, err = client.ListTopics(ctx, &emptypb.Empty{})
+			return err
+		})
+
+		t.app.QueueUpdateDraw(func() {
+			t.topicsList.SetTitle(" Topics (t: new, r: refresh) ")
+
+			if err != nil {
+				t.tuiLog("[red]Failed to load topics: %v", err)
+				t.showError(fmt.Sprintf("Failed to load topics: %v", err))
+				return
+			}
+
+			t.topics = resp.Topics
+			t.topicsList.Clear()
+			for _, topic := range t.topics {
+				t.topicsList.AddItem(fmt.Sprintf("[%d] %s", topic.Id, topic.Name), "", 0, nil)
+			}
+
+			// Če smo ravno naložili teme in nimamo izbrane, izberi prvo
+			if t.currentTopicID < 0 && len(t.topics) > 0 {
+				t.currentTopicID = t.topics[0].Id
+				t.loadMessages()
+				t.startSubscription()
+			}
+		})
+	}()
 }
 
 func (t *TUI) loadMessages() {
@@ -623,34 +649,51 @@ func (t *TUI) loadMessages() {
 		return
 	}
 
-	var resp *pb.GetMessagesResponse
+	currentTopicID := t.currentTopicID
+	t.messagesList.SetTitle(fmt.Sprintf(" Messages (Loading...) "))
 
-	err := t.safeReadOp("Load messages", func(client pb.MessageBoardClient) error {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+	go func() {
+		defer traceRoutine("loadMessages")()
 
-		var err error
-		resp, err = client.GetMessages(ctx, &pb.GetMessagesRequest{
-			TopicId:       t.currentTopicID,
-			FromMessageId: 0,
-			Limit:         100,
+		var resp *pb.GetMessagesResponse
+
+		err := t.safeReadOp("Load messages", func(client pb.MessageBoardClient) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			var err error
+			resp, err = client.GetMessages(ctx, &pb.GetMessagesRequest{
+				TopicId:       currentTopicID,
+				FromMessageId: 0,
+				Limit:         100,
+			})
+			return err
 		})
-		return err
-	})
 
-	if err != nil {
-		t.tuiLog("[red]Failed to load messages: %v", err)
-		t.showError(fmt.Sprintf("Failed to load messages: %v", err))
-		return
-	}
+		t.app.QueueUpdateDraw(func() {
+			t.messagesList.SetTitle(" Messages ") // Reset title
 
-	t.messages = resp.Messages
-	// sporočila urejena po id
-	slices.SortFunc(t.messages, func(a, b *pb.Message) int {
-		return int(a.Id - b.Id)
-	})
-	t.renderMessages()
-	t.updateStatusBar()
+			if err != nil {
+				t.tuiLog("[red]Failed to load messages: %v", err)
+				// Ne pokaži modala za napako pri osveževanju sporočil, ker je lahko moteče
+				// Samo v logu
+				return
+			}
+
+			// Preveri če smo še vedno na isti temi
+			if t.currentTopicID != currentTopicID {
+				return
+			}
+
+			t.messages = resp.Messages
+			// sporočila urejena po id
+			slices.SortFunc(t.messages, func(a, b *pb.Message) int {
+				return int(a.Id - b.Id)
+			})
+			t.renderMessages() // renderMessages launches goroutines for user names, might need check
+			t.updateStatusBar()
+		})
+	}()
 }
 
 func (t *TUI) renderMessages() {
@@ -685,6 +728,7 @@ func (t *TUI) renderMessages() {
 }
 
 func (t *TUI) sendMessage() {
+	defer traceRoutine("sendMessage")()
 	text := t.inputField.GetText()
 	if text == "" || t.currentTopicID < 0 {
 		return
@@ -701,26 +745,31 @@ func (t *TUI) sendMessage() {
 	topicID := t.currentTopicID
 	userID := t.currentUserID
 
-	err := t.safeWriteOp("Send message", func(client pb.MessageBoardClient) error {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+	go func() {
+		defer traceRoutine("sendMessage")()
+		err := t.safeWriteOp("Send message", func(client pb.MessageBoardClient) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
 
-		_, err := client.PostMessage(ctx, &pb.PostMessageRequest{
-			TopicId: topicID,
-			UserId:  userID,
-			Text:    text,
+			_, err := client.PostMessage(ctx, &pb.PostMessageRequest{
+				TopicId: topicID,
+				UserId:  userID,
+				Text:    text,
+			})
+			return err
 		})
-		return err
-	})
 
-	if err != nil {
-		t.tuiLog("[red]Failed to send message: %v", err)
-		t.showError(fmt.Sprintf("Failed to send message: %v", err))
-		return
-	}
-
-	t.inputField.SetText("")
-	t.loadMessages()
+		t.app.QueueUpdateDraw(func() {
+			if err != nil {
+				t.tuiLog("[red]Failed to send message: %v", err)
+				t.showError(fmt.Sprintf("Failed to send message: %v", err))
+				return
+			}
+			t.inputField.SetText("")
+			// Trigger reload async
+			t.loadMessages()
+		})
+	}()
 }
 
 func (t *TUI) showNewTopicDialog() {
@@ -736,21 +785,26 @@ func (t *TUI) showNewTopicDialog() {
 			return
 		}
 
-		err := t.safeWriteOp("Create topic", func(client pb.MessageBoardClient) error {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
+		go func() {
+			err := t.safeWriteOp("Create topic", func(client pb.MessageBoardClient) error {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
 
-			_, err := client.CreateTopic(ctx, &pb.CreateTopicRequest{Name: topicName})
-			return err
-		})
+				_, err := client.CreateTopic(ctx, &pb.CreateTopicRequest{Name: topicName})
+				return err
+			})
 
-		if err != nil {
-			t.tuiLog("[red]Failed to create topic: %v", err)
-			t.showError(fmt.Sprintf("Failed to create topic: %v", err))
-			return
-		}
-		t.pages.RemovePage("newtopic")
-		t.loadTopics()
+			t.app.QueueUpdateDraw(func() {
+				if err != nil {
+					t.tuiLog("[red]Failed to create topic: %v", err)
+					t.showError(fmt.Sprintf("Failed to create topic: %v", err))
+					return
+				}
+				t.pages.RemovePage("newtopic")
+			})
+			// Reload topics in separate goroutine call (it's already async)
+			t.loadTopics()
+		}()
 	})
 	form.AddButton("Cancel", func() {
 		t.pages.RemovePage("newtopic")
@@ -786,25 +840,30 @@ func (t *TUI) showLikeDialog() {
 		topicID := t.currentTopicID
 		userID := t.currentUserID
 
-		err := t.safeWriteOp("Like message", func(client pb.MessageBoardClient) error {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
+		go func() {
+			err := t.safeWriteOp("Like message", func(client pb.MessageBoardClient) error {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
 
-			_, err := client.LikeMessage(ctx, &pb.LikeMessageRequest{
-				TopicId:   topicID,
-				MessageId: msgID,
-				UserId:    userID,
+				_, err := client.LikeMessage(ctx, &pb.LikeMessageRequest{
+					TopicId:   topicID,
+					MessageId: msgID,
+					UserId:    userID,
+				})
+				return err
 			})
-			return err
-		})
 
-		if err != nil {
-			t.tuiLog("[red]Failed to like message: %v", err)
-			t.showError(fmt.Sprintf("Failed to like message: %v", err))
-			return
-		}
-		t.pages.RemovePage("like")
-		t.loadMessages()
+			t.app.QueueUpdateDraw(func() {
+				if err != nil {
+					t.tuiLog("[red]Failed to like message: %v", err)
+					t.showError(fmt.Sprintf("Failed to like message: %v", err))
+					return
+				}
+				t.pages.RemovePage("like")
+				// Reload async
+				t.loadMessages()
+			})
+		}()
 	})
 	form.AddButton("Cancel", func() {
 		t.pages.RemovePage("like")
@@ -840,25 +899,29 @@ func (t *TUI) showDeleteDialog() {
 		topicID := t.currentTopicID
 		userID := t.currentUserID
 
-		err := t.safeWriteOp("Delete message", func(client pb.MessageBoardClient) error {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
+		go func() {
+			err := t.safeWriteOp("Delete message", func(client pb.MessageBoardClient) error {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
 
-			_, err := client.DeleteMessage(ctx, &pb.DeleteMessageRequest{
-				TopicId:   topicID,
-				MessageId: msgID,
-				UserId:    userID,
+				_, err := client.DeleteMessage(ctx, &pb.DeleteMessageRequest{
+					TopicId:   topicID,
+					MessageId: msgID,
+					UserId:    userID,
+				})
+				return err
 			})
-			return err
-		})
 
-		if err != nil {
-			t.tuiLog("[red]Failed to delete message: %v", err)
-			t.showError(fmt.Sprintf("Failed to delete message: %v", err))
-			return
-		}
-		t.pages.RemovePage("delete")
-		t.loadMessages()
+			t.app.QueueUpdateDraw(func() {
+				if err != nil {
+					t.tuiLog("[red]Failed to delete message: %v", err)
+					t.showError(fmt.Sprintf("Failed to delete message: %v", err))
+					return
+				}
+				t.pages.RemovePage("delete")
+				t.loadMessages()
+			})
+		}()
 	})
 	form.AddButton("Cancel", func() {
 		t.pages.RemovePage("delete")
@@ -899,26 +962,30 @@ func (t *TUI) showEditDialog() {
 		userID := t.currentUserID
 		text := newText
 
-		err := t.safeWriteOp("Update message", func(client pb.MessageBoardClient) error {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
+		go func() {
+			err := t.safeWriteOp("Update message", func(client pb.MessageBoardClient) error {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
 
-			_, err := client.UpdateMessage(ctx, &pb.UpdateMessageRequest{
-				TopicId:   topicID,
-				MessageId: msgID,
-				UserId:    userID,
-				Text:      text,
+				_, err := client.UpdateMessage(ctx, &pb.UpdateMessageRequest{
+					TopicId:   topicID,
+					MessageId: msgID,
+					UserId:    userID,
+					Text:      text,
+				})
+				return err
 			})
-			return err
-		})
 
-		if err != nil {
-			t.tuiLog("[red]Failed to update message: %v", err)
-			t.showError(fmt.Sprintf("Failed to update message: %v", err))
-			return
-		}
-		t.pages.RemovePage("edit")
-		t.loadMessages()
+			t.app.QueueUpdateDraw(func() {
+				if err != nil {
+					t.tuiLog("[red]Failed to update message: %v", err)
+					t.showError(fmt.Sprintf("Failed to update message: %v", err))
+					return
+				}
+				t.pages.RemovePage("edit")
+				t.loadMessages()
+			})
+		}()
 	})
 	form.AddButton("Cancel", func() {
 		t.pages.RemovePage("edit")
@@ -938,27 +1005,10 @@ func (t *TUI) showEditDialog() {
 }
 
 func (t *TUI) showServersDialog() {
-	// Refresh cluster state first
-	t.cluster.refreshClusterState()
-
-	headAddr := t.cluster.HeadAddr()
-	headNodeID := t.cluster.HeadNodeID()
-	tailAddr := t.cluster.TailAddr()
-	tailNodeID := t.cluster.TailNodeID()
-	controlAddrs := t.cluster.ControlAddrs()
-
-	var sb strings.Builder
-	sb.WriteString("[yellow]Control Plane Servers:[white]\n")
-	for i, addr := range controlAddrs {
-		sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, addr))
-	}
-	sb.WriteString("\n[yellow]Data Plane Servers:[white]\n")
-	sb.WriteString(fmt.Sprintf("  [green]Head:[white] %s (ID: %d)\n", headAddr, headNodeID))
-	sb.WriteString(fmt.Sprintf("  [blue]Tail:[white] %s (ID: %d)\n", tailAddr, tailNodeID))
-
+	// Pripravi dialog z začetnim stanjem
 	textView := tview.NewTextView().
 		SetDynamicColors(true).
-		SetText(sb.String())
+		SetText("[yellow]Refreshing cluster state...[white]")
 	textView.SetBorder(true).SetTitle(" Cluster Servers ").SetTitleAlign(tview.AlignCenter)
 	textView.SetBackgroundColor(tcell.ColorBlack)
 
@@ -981,7 +1031,46 @@ func (t *TUI) showServersDialog() {
 
 	t.pages.AddPage("servers", modal, true, true)
 	t.app.SetFocus(textView)
-	t.updateStatusBar()
+
+	// Osveži stanje v ozadju
+	go func() {
+		// Uporabi traceRoutine če je na voljo
+		func() {
+			if traceLogger != nil {
+				start := time.Now()
+				id := start.UnixNano() % 10000
+				traceLogger.Printf("[START] showServersDialog:refresh [%04d]", id)
+				defer func() {
+					traceLogger.Printf("[END]   showServersDialog:refresh [%04d] (duration: %v)", id, time.Since(start))
+				}()
+			}
+		}()
+
+		t.cluster.refreshClusterState()
+
+		t.app.QueueUpdateDraw(func() {
+			headAddr := t.cluster.HeadAddr()
+			headNodeID := t.cluster.HeadNodeID()
+			tailAddr := t.cluster.TailAddr()
+			tailNodeID := t.cluster.TailNodeID()
+			controlAddrs := t.cluster.ControlAddrs()
+
+			var sb strings.Builder
+			sb.WriteString("[yellow]Control Plane Servers:[white]\n")
+			for i, addr := range controlAddrs {
+				sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, addr))
+			}
+			sb.WriteString("\n[yellow]Data Plane Servers:[white]\n")
+			sb.WriteString(fmt.Sprintf("  [green]Head:[white] %s (ID: %d)\n", headAddr, headNodeID))
+			sb.WriteString(fmt.Sprintf("  [blue]Tail:[white] %s (ID: %d)\n", tailAddr, tailNodeID))
+
+			// Preveri če je dialog še vedno odprt preden posodobiš
+			if t.pages.HasPage("servers") {
+				textView.SetText(sb.String())
+			}
+			t.updateStatusBar()
+		})
+	}()
 }
 
 func (t *TUI) showError(message string) {
@@ -1401,7 +1490,6 @@ func (t *TUI) renderSubscriptionMessages() {
 	t.updateStatusBar()
 }
 
-// startMultiTopicSubscription začne naročnino za več tem
 func (t *TUI) startMultiTopicSubscription(subIndex int) {
 	if subIndex < 0 || subIndex >= len(t.subscriptions) {
 		return
@@ -1414,6 +1502,5 @@ func (t *TUI) startMultiTopicSubscription(subIndex int) {
 	subCtx, subCancel := context.WithCancel(context.Background())
 	sub.Cancel = subCancel
 
-	// Use the shared subscription loop with reconnection support
 	go t.subscriptionLoop(subCtx, topicIDs, userID, subIndex)
 }

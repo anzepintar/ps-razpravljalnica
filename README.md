@@ -125,6 +125,7 @@ Argumenti:
 TODO:
 
 - če odstraniš raft leaderja, ali potem kdo drug postane leader - trenutno se mi zdi, da ostane isti raft leader (prevote denied, kljub temu, da leader ne obstaja več)?
+- mogoče da control pove kdo je leader, da lahko dodaš strežnik na leaderja (ob dodajanju data strežnika v podatkovno ravnino)?
 - primeri uporabe
 - dodaj dober logging v clienta
 - da se izpiše trace vseg go rutin
@@ -132,3 +133,116 @@ TODO:
     - izpadi strežnikov control - entry, non entry
     - izpadi strežnikov data - head, tail, subscription
     - dodajanje strežnikov in povezovanje na njih (če obdržijo vse podatke)
+
+
+## Primeri uporabe:
+
+
+### Build
+
+```bash
+mkdir -p out
+rm runtime -r
+go build -C control -o ../out/control .
+go build -C server -o ../out/server .
+go build -C client -o ../out/client .
+```
+
+### Testiranje
+
+```bash
+# Vsi unit testi v projektu
+cd client && go test -v && cd ..
+cd server && go test -v && cd ..
+cd control && go test -v && cd ..
+
+# Fuzz testi za client
+go test -fuzz=FuzzParseTopicIDs -fuzztime=30s ./client
+
+# Fuzz testi za server
+go test -fuzz=FuzzValidateUserName -fuzztime=30s ./server
+
+# Fuzz testi za control
+go test -fuzz=FuzzValidateNodeAddress -fuzztime=30s ./control
+```
+
+### Zagon
+
+#### 1. Kontrolna ravnina (Raft cluster)
+
+> vsak v svojem terminalu (split)
+
+```bash
+# bootstrap node
+rm runtime -r
+./out/control 127.0.0.1:6000 node1 --bootstrap-raft
+
+./out/control 127.0.0.1:6001 node2 -t
+
+./out/control 127.0.0.1:6002 node3
+
+go install github.com/Jille/raftadmin/cmd/raftadmin@latest
+
+raftadmin 127.0.0.1:6000 add_voter node2 127.0.0.1:6001 0
+raftadmin 127.0.0.1:6000 add_voter node3 127.0.0.1:6002 0
+
+```
+
+#### 2. Data plane strežniki (Chain replication)
+
+> vsak v svojem terminalu (split)
+
+```bash
+./out/server 127.0.0.1:6000 -b 127.0.0.1:5000
+
+./out/server 127.0.0.1:6000 -b 127.0.0.1:5001 -t
+
+./out/server 127.0.0.1:6000 -b 127.0.0.1:5002
+```
+
+### Seed
+
+```bash
+./out/client --entry 127.0.0.1:6000 create-user "Janez"
+./out/client --entry 127.0.0.1:6000 create-user "Ana"
+./out/client --entry 127.0.0.1:6000 create-user "Franci"
+./out/client --entry 127.0.0.1:6000 create-topic "Avtomobili"
+./out/client --entry 127.0.0.1:6000 create-topic "Kolesarstvo"
+./out/client --entry 127.0.0.1:6000 create-topic "Letala"
+
+./out/client --entry 127.0.0.1:6000 post-message --topic-id 0 --user-id 1 "Iščem rabljen avto, priporočila?"
+./out/client --entry 127.0.0.1:6000 post-message --topic-id 1 --user-id 2 "Dizel manj kot 100000 km"
+./out/client --entry 127.0.0.1:6000 post-message --topic-id 0 --user-id 2 "Katero kolo priporočate?"
+./out/client --entry 127.0.0.1:6000 post-message --topic-id 1 --user-id 2 "Gorskega"
+```
+
+> preko tui:
+
+### Pisanje sporočil
+
+### Ustvarjanje tem
+
+### Všečkanje sporočil
+
+### Dodajanje naročnin 
+
+### Pogled na strežnike
+
+
+
+### Redundanca podatkovne ravnine
+
+#### Padec head
+
+#### Padec tail
+
+#### Padec vmesnega vozlišča
+
+#### Dodajanje novega vozlišča
+
+
+### Redundanca nadzorne ravnine
+
+#### Padec leaderja
+
+#### Dodajanje vozlišča

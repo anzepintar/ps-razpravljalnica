@@ -45,6 +45,21 @@ const (
 // tuiMode disables logging output when TUI is active
 var tuiMode = false
 
+// traceLogger writes debug traces if --log-file is specified
+var traceLogger *log.Logger
+
+func traceRoutine(name string) func() {
+	if traceLogger == nil {
+		return func() {}
+	}
+	start := time.Now()
+	id := start.UnixNano() % 10000 // short id
+	traceLogger.Printf("[START] %s [%04d]", name, id)
+	return func() {
+		traceLogger.Printf("[END]   %s [%04d] (duration: %v)", name, id, time.Since(start))
+	}
+}
+
 var CLI struct {
 	EntryPoint string        `help:"Entry point address (control plane node)" default:"127.0.0.1:6000" name:"entry" short:"e"`
 	Timeout    time.Duration `help:"Request timeout" default:"5s" name:"timeout"`
@@ -60,8 +75,6 @@ var CLI struct {
 	GetMessages GetMessagesCmd `cmd:"get-messages" help:"Get messages for a topic"`
 	Subscribe   SubscribeCmd   `cmd:"subscribe" help:"Subscribe to topics (streaming)"`
 }
-
-// Definicije ukazov
 
 type CreateUserCmd struct {
 	Name string `arg:"" required:"" help:"Name of the user"`
@@ -110,12 +123,14 @@ type SubscribeCmd struct {
 	From     int64  `name:"from" help:"From message id" default:"0"`
 }
 
-func parseTUIFlags() (bool, string, error) {
+func parseTUIFlags() (bool, string, string, error) {
 	tuiFlags := flag.NewFlagSet("tui", flag.ContinueOnError)
 	tuiFlags.SetOutput(io.Discard)
 
 	tuiMode := tuiFlags.Bool("t", false, "Enable TUI mode")
 	tuiModeLong := tuiFlags.Bool("tui", false, "Enable TUI mode")
+	logFile := tuiFlags.String("l", "", "Log file for debugging")
+	logFileLong := tuiFlags.String("log-file", "", "Log file for debugging")
 	entryPoint := tuiFlags.String("e", "127.0.0.1:6000", "Entry point address")
 	entryPointLong := tuiFlags.String("entry", "127.0.0.1:6000", "Entry point address")
 
@@ -127,6 +142,16 @@ func parseTUIFlags() (bool, string, error) {
 		if arg == "-t" || arg == "--tui" {
 			*tuiMode = true
 			*tuiModeLong = true
+		} else if arg == "-l" && i+1 < len(args) {
+			*logFile = args[i+1]
+			i++
+		} else if arg == "--log-file" && i+1 < len(args) {
+			*logFileLong = args[i+1]
+			i++
+		} else if strings.HasPrefix(arg, "-l=") {
+			*logFile = strings.TrimPrefix(arg, "-l=")
+		} else if strings.HasPrefix(arg, "--log-file=") {
+			*logFileLong = strings.TrimPrefix(arg, "--log-file=")
 		} else if arg == "-e" && i+1 < len(args) {
 			*entryPoint = args[i+1]
 			i++
@@ -148,14 +173,30 @@ func parseTUIFlags() (bool, string, error) {
 		ep = *entryPointLong
 	}
 
-	return isTUI, ep, nil
+	logPath := *logFile
+	if *logFileLong != "" {
+		logPath = *logFileLong
+	}
+
+	return isTUI, ep, logPath, nil
 }
 
 func main() {
-	isTUI, entryPoint, err := parseTUIFlags()
+	isTUI, entryPoint, logPath, err := parseTUIFlags()
 	if err != nil {
 		fmt.Printf("Error parsing flags: %v\n", err)
 		os.Exit(1)
+	}
+
+	if logPath != "" {
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			fmt.Printf("Error opening log file: %v\n", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		traceLogger = log.New(f, "", log.LstdFlags|log.Lmicroseconds)
+		traceLogger.Printf("=== Starting Client (TUI: %v) ===", isTUI)
 	}
 
 	if isTUI {
@@ -246,10 +287,11 @@ func NewClusterClient(entryPoint string) (*ClusterClient, error) {
 		keepaliveParams: keepalive.ClientParameters{
 			Time:                connectionKeepaliveTime,
 			Timeout:             connectionKeepaliveTimeout,
-			PermitWithoutStream: true, // Send pings even without active streams
+			PermitWithoutStream: true,
 		},
 		healthCheckDone: make(chan struct{}),
 	}
+	defer traceRoutine("NewClusterClient")()
 
 	// Try to connect with retries
 	const maxRetries = 3
@@ -276,22 +318,10 @@ func NewClusterClient(entryPoint string) (*ClusterClient, error) {
 }
 
 func (c *ClusterClient) refreshClusterState() error {
-	c.mtx.Lock()
-	defer c.mtx.Unlock()
+	defer traceRoutine("refreshClusterState")()
 
-	return c.refreshClusterStateLocked()
-}
-
-// normalizacija za 127.0.0.1 ipd
-func normalizeAddress(addr string) string {
-	if strings.Contains(addr, "://") {
-		return addr
-	}
-	return "passthrough:///" + addr
-}
-
-func (c *ClusterClient) refreshClusterStateLocked() error {
-	// Collect addresses to try: entry point first, then cached control addresses
+	// 1. Pridobivanje naslovov
+	c.mtx.RLock()
 	addressesToTry := []string{c.entryPoint}
 	if c.cachedState != nil && len(c.cachedState.ControlAddrs) > 0 {
 		for _, addr := range c.cachedState.ControlAddrs {
@@ -300,18 +330,21 @@ func (c *ClusterClient) refreshClusterStateLocked() error {
 			}
 		}
 	}
+	cachedState := c.cachedState
+	c.mtx.RUnlock()
 
+	// 2. Poskus fetchanja stanja
 	var state *pb.GetClusterStateResponse
 	var lastErr error
 	var successAddr string
 
-	// Try each address until one works
 	for _, addr := range addressesToTry {
 		target := normalizeAddress(addr)
 		conn, err := grpc.NewClient(target,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithKeepaliveParams(c.keepaliveParams))
 		if err != nil {
+			logMessage("Failed to connect to %s: %v", addr, err)
 			lastErr = err
 			continue
 		}
@@ -323,27 +356,58 @@ func (c *ClusterClient) refreshClusterStateLocked() error {
 		conn.Close()
 
 		if err != nil {
+			logMessage("Failed to get state from %s: %v", addr, err)
 			lastErr = err
 			continue
 		}
 
 		successAddr = addr
+		logMessage("Successfully retrieved cluster state from %s", successAddr)
+		if state != nil {
+			var serverAddrs []string
+			for _, s := range state.Servers {
+				serverAddrs = append(serverAddrs, s.Address)
+			}
+			headDesc := "<nil>"
+			if state.Head != nil {
+				headDesc = fmt.Sprintf("%s (ID: %d)", state.Head.Address, state.Head.NodeId)
+			}
+			tailDesc := "<nil>"
+			if state.Tail != nil {
+				tailDesc = fmt.Sprintf("%s (ID: %d)", state.Tail.Address, state.Tail.NodeId)
+			}
+			logMessage("Cluster State: Head=%s, Tail=%s, Servers=%v", headDesc, tailDesc, serverAddrs)
+		}
 		break
 	}
 
 	if state == nil {
 		// All addresses failed, try to use cached state for graceful degradation
-		if c.cachedState != nil && c.cachedState.IsValid() {
+		if cachedState != nil && cachedState.IsValid() {
 			logMessage("Warning: all control nodes unreachable, using cached state (age: %v)",
-				time.Since(c.cachedState.CachedAt))
+				time.Since(cachedState.CachedAt))
 			return nil
 		}
 		return fmt.Errorf("failed to get cluster state from any control node: %v", lastErr)
 	}
 
-	// Log if we used an alternative address
+	return c.updateClusterState(state, successAddr)
+}
+
+// normalizacija za 127.0.0.1 ipd
+func normalizeAddress(addr string) string {
+	if strings.Contains(addr, "://") {
+		return addr
+	}
+	return "passthrough:///" + addr
+}
+
+func (c *ClusterClient) updateClusterState(state *pb.GetClusterStateResponse, successAddr string) error {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+
 	if successAddr != c.entryPoint {
-		logMessage("Connected to alternative control node: %s", successAddr)
+		logMessage("Used alternative control node: %s (Entry point: %s)", successAddr, c.entryPoint)
 	}
 
 	c.controlAddrs = make([]string, len(state.Servers))
@@ -354,7 +418,7 @@ func (c *ClusterClient) refreshClusterStateLocked() error {
 	//  multi:///  naslov
 	if len(c.controlAddrs) > 0 {
 		multiAddr := "multi:///" + strings.Join(c.controlAddrs, ",")
-		// Only close and recreate if addresses changed
+
 		newAddrs := strings.Join(c.controlAddrs, ",")
 		oldAddrs := ""
 		if c.cachedState != nil {
@@ -364,7 +428,7 @@ func (c *ClusterClient) refreshClusterStateLocked() error {
 			c.controlConn.Close()
 			c.controlConn = nil
 		}
-		// Retry options for control plane calls (leader might change)
+
 		retryOpts := []grpc_retry.CallOption{
 			grpc_retry.WithBackoff(grpc_retry.BackoffExponential(100 * time.Millisecond)),
 			grpc_retry.WithMax(5),
@@ -432,7 +496,6 @@ func (c *ClusterClient) refreshClusterStateLocked() error {
 		}
 	}
 
-	// Update cached state for graceful degradation
 	c.cachedState = &CachedClusterState{
 		ControlAddrs: c.controlAddrs,
 		HeadAddr:     c.headAddr,
@@ -453,6 +516,7 @@ func (c *ClusterClient) snitch(nodeID int64) error {
 
 // snitchWithRetries reports a failed node with configurable retries
 func (c *ClusterClient) snitchWithRetries(nodeID int64, maxRetries int) error {
+	defer traceRoutine(fmt.Sprintf("snitchWithRetries(%d)", nodeID))()
 	c.mtx.RLock()
 	client := c.controlClient
 	c.mtx.RUnlock()
@@ -549,6 +613,9 @@ func logMessage(format string, v ...any) {
 	} else {
 		log.Print(msg)
 	}
+	if traceLogger != nil {
+		traceLogger.Output(2, msg) // Output to trace file as well
+	}
 }
 
 // startHealthCheck starts a background goroutine that periodically checks
@@ -575,6 +642,7 @@ func (c *ClusterClient) startHealthCheck() {
 
 // performHealthCheck checks health of head and tail nodes
 func (c *ClusterClient) performHealthCheck() {
+	defer traceRoutine("performHealthCheck")()
 	c.mtx.RLock()
 	headClient := c.headClient
 	tailClient := c.tailClient

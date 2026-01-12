@@ -122,17 +122,6 @@ Argumenti:
 
 
 
-TODO:
-
-- če odstraniš raft leaderja, ali potem kdo drug postane leader - trenutno se mi zdi, da ostane isti raft leader (prevote denied, kljub temu, da leader ne obstaja več)?
-- mogoče da control pove kdo je leader, da lahko dodaš strežnik na leaderja (ob dodajanju data strežnika v podatkovno ravnino)?
-- primeri uporabe
-- dodaj dober logging v clienta
-- da se izpiše trace vseg go rutin
-- dobro preizkusi vse primere uporabe
-    - izpadi strežnikov control - entry, non entry
-    - izpadi strežnikov data - head, tail, subscription
-    - dodajanje strežnikov in povezovanje na njih (če obdržijo vse podatke)
 
 
 ## Primeri uporabe:
@@ -210,10 +199,10 @@ raftadmin 127.0.0.1:6000 add_voter node3 127.0.0.1:6002 0
 ./out/client --entry 127.0.0.1:6000 create-topic "Kolesarstvo"
 ./out/client --entry 127.0.0.1:6000 create-topic "Letala"
 
-./out/client --entry 127.0.0.1:6000 post-message --topic-id 0 --user-id 1 "Iščem rabljen avto, priporočila?"
-./out/client --entry 127.0.0.1:6000 post-message --topic-id 1 --user-id 2 "Dizel manj kot 100000 km"
-./out/client --entry 127.0.0.1:6000 post-message --topic-id 0 --user-id 2 "Katero kolo priporočate?"
-./out/client --entry 127.0.0.1:6000 post-message --topic-id 1 --user-id 2 "Gorskega"
+./out/client --entry 127.0.0.1:6000 post-message --topic-id=0 --user-id=1 "Iščem rabljen avto, priporočila?"
+./out/client --entry 127.0.0.1:6000 post-message --topic-id=0 --user-id=2 "Dizel manj kot 100000 km"
+./out/client --entry 127.0.0.1:6000 post-message --topic-id=0 --user-id=2 "Katero kolo priporočate?"
+./out/client --entry 127.0.0.1:6000 post-message --topic-id=0 --user-id=2 "Gorskega"
 ```
 
 > preko tui:
@@ -250,3 +239,12 @@ raftadmin 127.0.0.1:6000 add_voter node3 127.0.0.1:6002 0
 #### Padec leaderja
 
 #### Dodajanje vozlišča
+
+
+
+TODO:
+- dobro preizkusi vse primere uporabe
+    - izpadi strežnikov control - entry, non entry
+    - izpadi strežnikov data - head, tail, subscription
+    - dodajanje strežnikov in povezovanje na njih (če obdržijo vse podatke)
+- odpravi shiftanje

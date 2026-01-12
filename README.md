@@ -22,18 +22,18 @@ go build -C client -o ../out/client .
 
 ```bash
 # Vsi unit testi v projektu
-cd client && go test -v && cd ..
-cd server && go test -v && cd ..
-cd control && go test -v && cd ..
+go test -C client -v
+go test -C server -v
+go test -C control -v
 
 # Fuzz testi za client
-go test -fuzz=FuzzParseTopicIDs -fuzztime=30s ./client
+go test -C client -fuzz=FuzzParseTopicIDs -fuzztime=10s
 
 # Fuzz testi za server
-go test -fuzz=FuzzValidateUserName -fuzztime=30s ./server
+go test -C server -fuzz=FuzzValidateUserName -fuzztime=10s
 
 # Fuzz testi za control
-go test -fuzz=FuzzValidateNodeAddress -fuzztime=30s ./control
+go test -C control -fuzz=FuzzValidateNodeAddress -fuzztime=10s
 ```
 
 ## Zagon
@@ -190,6 +190,8 @@ rm runtime -r
 
 go install github.com/Jille/raftadmin/cmd/raftadmin@latest
 
+# Pokaži tab z raftadmin ukazi
+
 raftadmin 127.0.0.1:6000 add_voter node2 127.0.0.1:6001 0
 raftadmin 127.0.0.1:6000 add_voter node3 127.0.0.1:6002 0
 
@@ -249,11 +251,11 @@ raftadmin 127.0.0.1:6000 add_voter node3 127.0.0.1:6002 0
 
 ### Redundanca podatkovne ravnine
 
-- Padec head
+- Padec head + ponovni zagon
 
-- Padec tail
+- Padec tail + ponovni zagon
 
-- Padec vmesnega vozlišča
+- Padec vmesnega vozlišča + ponovni zagon
 
 - Dodajanje novega vozlišča
 
@@ -272,32 +274,25 @@ raftadmin 127.0.0.1:6000 add_voter node3 127.0.0.1:6002 0
 
 ```bash
 ./out/control 127.0.0.1:6003 node4
-# počakaj nekaj trenutkov
+# počakaj nekaj trenutkov - moraš dodati k trenutnemu leaderju
 raftadmin 127.0.0.1:6000 add_voter node4 127.0.0.1:6003 0
 # počakaj nekaj trenutkov
 ```
 
-### Testiranje metod
+### Testiranje metod - nekaj primerov
 
 ```bash
 # Vsi unit testi v projektu
-cd client && go test -v && cd ..
-cd server && go test -v && cd ..
-cd control && go test -v && cd ..
+go test -C client -v
+go test -C server -v
+go test -C control -v
 
 # Fuzz testi za client
-go test -fuzz=FuzzParseTopicIDs -fuzztime=30s ./client
+go test -C client -fuzz=FuzzParseTopicIDs -fuzztime=10s
 
 # Fuzz testi za server
-go test -fuzz=FuzzValidateUserName -fuzztime=30s ./server
+go test -C server -fuzz=FuzzValidateUserName -fuzztime=10s
 
 # Fuzz testi za control
-go test -fuzz=FuzzValidateNodeAddress -fuzztime=30s ./control
+go test -C control -fuzz=FuzzValidateNodeAddress -fuzztime=10s
 ```
-
-
-TODO:
-- dobro preizkusi vse primere uporabe
-    - izpadi strežnikov control - entry, non entry
-    - izpadi strežnikov data - head, tail, subscription
-    - dodajanje strežnikov in povezovanje na njih (če obdržijo vse podatke)

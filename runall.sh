@@ -73,8 +73,8 @@ sleep 5
 
 # Set up raftadmin commands in the first window
 tmux select-window -t "raftadmin"
-tmux send-keys "sleep 3 && raftadmin 127.0.0.1:6000 add_voter node2 127.0.0.1:6001 0" C-m
-tmux send-keys "sleep 1 && raftadmin 127.0.0.1:6000 add_voter node3 127.0.0.1:6002 0" C-m
+tmux send-keys "raftadmin 127.0.0.1:6000 add_voter node2 127.0.0.1:6001 0" C-m
+tmux send-keys "raftadmin 127.0.0.1:6000 add_voter node3 127.0.0.1:6002 0" C-m
 
 echo "Povezani nadzorni strežniki"
 
@@ -103,8 +103,8 @@ echo "Zagnani podatkovni strežniki"
 sleep 5
 
 # Create window for clients, split 50-50
-tmux new-window -n "clients"
-tmux select-window -t "clients"
+tmux new-window -n "odjemalci"
+tmux select-window -t "odjemalci"
 tmux split-window -h
 
 # Client 1 pane (left) with seed data
@@ -131,8 +131,8 @@ tmux send-keys "./out/client -e 127.0.0.1:6000 -t"
 echo "Zaključen seed"
 
 # Create readme window
-tmux new-window -n "readme.md"
-tmux select-window -t "readme.md"
+tmux new-window -n "readme"
+tmux select-window -t "readme"
 tmux send-keys "cat README.md" C-m
 
 sleep 2

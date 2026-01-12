@@ -71,11 +71,14 @@ func myLog(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grp
 	if !cli.Tui {
 		log.Print(msg)
 	}
-	TuiLog(msg)
+	TuiLog("%s", msg)
 	return resp, err
 }
 
 func (s *RunControlCmd) Run() error {
+	if s.Tui {
+		log.SetOutput(io.Discard)
+	}
 	go statePrinter()
 	lis, err := net.Listen("tcp", s.BindAddr)
 	if err != nil {
@@ -94,7 +97,9 @@ func (s *RunControlCmd) Run() error {
 	raftadmin.Register(srv, r)
 	leaderhealth.Setup(r, srv, []string{""})
 	tm.Register(srv)
-	log.Printf("server listening at %v", lis.Addr())
+	if !s.Tui {
+		log.Printf("server listening at %v", lis.Addr())
+	}
 	if s.Tui {
 		go func() {
 			if err := srv.Serve(lis); err != nil {

@@ -50,7 +50,7 @@ func myLog(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grp
 	if !cli.Tui {
 		log.Print(msg)
 	}
-	TuiLog(msg)
+	TuiLog("%s", msg)
 	return resp, err
 }
 

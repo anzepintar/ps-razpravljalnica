@@ -727,6 +727,23 @@ func (t *TUI) renderMessages() {
 	t.messagesList.ScrollToEnd()
 }
 
+func (t *TUI) getTopicIDForMessage(msgID int64) int64 {
+	// Če gledamo specifično temo, uporabimo trenutni ID
+	if !t.viewingSubscription {
+		return t.currentTopicID
+	}
+
+	// Če gledamo naročnino, poiščemo sporočilo v lokalnem predpomnilniku
+	if t.currentSubIndex >= 0 && t.currentSubIndex < len(t.subscriptions) {
+		for _, msg := range t.subscriptions[t.currentSubIndex].Messages {
+			if msg.Id == msgID {
+				return msg.TopicId
+			}
+		}
+	}
+	return -1
+}
+
 func (t *TUI) sendMessage() {
 	defer traceRoutine("sendMessage")()
 	text := t.inputField.GetText()
@@ -837,7 +854,11 @@ func (t *TUI) showLikeDialog() {
 			return
 		}
 		msgID, _ := strconv.ParseInt(msgIDStr, 10, 64)
-		topicID := t.currentTopicID
+		topicID := t.getTopicIDForMessage(msgID)
+		if topicID < 0 {
+			t.showError("Message ID not found in current view.")
+			return
+		}
 		userID := t.currentUserID
 
 		go func() {
@@ -896,7 +917,11 @@ func (t *TUI) showDeleteDialog() {
 			return
 		}
 		msgID, _ := strconv.ParseInt(msgIDStr, 10, 64)
-		topicID := t.currentTopicID
+		topicID := t.getTopicIDForMessage(msgID)
+		if topicID < 0 {
+			t.showError("Message ID not found in current view.")
+			return
+		}
 		userID := t.currentUserID
 
 		go func() {
@@ -950,7 +975,7 @@ func (t *TUI) showEditDialog() {
 	}, func(text string) {
 		msgIDStr = text
 	})
-	form.AddInputField("New text", "", 45, nil, func(text string) {
+	form.AddInputField("New text", "", 15, nil, func(text string) {
 		newText = text
 	})
 	form.AddButton("Update", func() {
@@ -958,7 +983,11 @@ func (t *TUI) showEditDialog() {
 			return
 		}
 		msgID, _ := strconv.ParseInt(msgIDStr, 10, 64)
-		topicID := t.currentTopicID
+		topicID := t.getTopicIDForMessage(msgID)
+		if topicID < 0 {
+			t.showError("Message ID not found in current view.")
+			return
+		}
 		userID := t.currentUserID
 		text := newText
 
@@ -998,7 +1027,7 @@ func (t *TUI) showEditDialog() {
 		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
 			AddItem(nil, 0, 1, false).
 			AddItem(form, 12, 1, true).
-			AddItem(nil, 0, 1, false), 60, 1, true).
+			AddItem(nil, 0, 1, false), 40, 1, true).
 		AddItem(nil, 0, 1, false)
 
 	t.pages.AddPage("edit", modal, true, true)

@@ -732,6 +732,12 @@ func (s *MessageBoardServer) UpdateMessage(ctx context.Context, req *rpb.UpdateM
 	} else {
 		message_id = u
 	}
+
+	msg := topic.messages[message_id]
+	if msg.user != user_id {
+		return nil, status.Error(codes.PermissionDenied, "Can't update other user's message")
+	}
+
 	next_msg, err := fwUpdateMessage(ctx, req)
 	if err != nil {
 		if status.Code(err) != codes.Internal {
@@ -740,20 +746,26 @@ func (s *MessageBoardServer) UpdateMessage(ctx context.Context, req *rpb.UpdateM
 		return nil, status.Error(codes.Internal, "Chain broke, retry.")
 	}
 
-	msg := topic.messages[message_id]
-	msg.text = req.Text
-	if next_msg != nil && (next_msg.UserId != msg.user || next_msg.Text != msg.text || next_msg.CreatedAt != msg.created || next_msg.Likes != 0) {
-		go cntrlldp.snitchNext()
-		return nil, status.Error(codes.Internal, "Chain broke, retry.")
+	if next_msg != nil {
+		// quick fix:
+		// Ne primerjamo CreatedAt, ker vsako vozlišče v PostMessage ustvari
+		// svoj timestamp - so že od začetka različni za nekaj nanosekund.
+		// Primerjamo samo polja, ki jih UpdateMessage dejansko spreminja/preverja.
+		if next_msg.UserId != msg.user || next_msg.Text != req.Text ||
+			next_msg.Likes != int32(len(msg.likes)) {
+			go cntrlldp.snitchNext()
+			return nil, status.Error(codes.Internal, "Chain broke, retry.")
+		}
 	}
 
+	msg.text = req.Text
 	s.subs_ch <- MessageEv{op: rpb.OpType_OP_UPDATE, message: msg, at: timestamppb.Now(), topic: topic_id, message_id: message_id}
 
 	topic.messages[message_id] = msg
 	return &rpb.Message{
 		Id:        message_id,
 		TopicId:   topic_id,
-		UserId:    user_id,
+		UserId:    msg.user,
 		Text:      msg.text,
 		CreatedAt: msg.created,
 		Likes:     int32(len(msg.likes)),

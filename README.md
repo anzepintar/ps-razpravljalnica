@@ -127,3 +127,8 @@ TODO:
 - če odstraniš raft leaderja, ali potem kdo drug postane leader - trenutno se mi zdi, da ostane isti raft leader (prevote denied, kljub temu, da leader ne obstaja več)?
 - primeri uporabe
 - dodaj dober logging v clienta
+- da se izpiše trace vseg go rutin
+- dobro preizkusi vse primere uporabe
+    - izpadi strežnikov control - entry, non entry
+    - izpadi strežnikov data - head, tail, subscription
+    - dodajanje strežnikov in povezovanje na njih (če obdržijo vse podatke)

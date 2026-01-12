@@ -8,7 +8,10 @@
 # Ctrl+b w - Window list (interactive selection)
 # tmux attach -t ps-razpravljalnica - Re-attach
 # tmux kill-server
-
+#
+# Ali pa dodaj
+# set -g mouse on
+# v .config/tmux/tmux.conf
 
 #!/bin/bash
 
@@ -41,10 +44,14 @@ echo "go build zaključen"
 # Kill existing session if it exists
 tmux kill-session -t $SESSION 2>/dev/null
 
-# Create new session with first control plane node
-tmux new-session -d -s $SESSION -n "Nadzorni strežniki"
+# Create new session with raftadmin
+tmux new-session -d -s $SESSION -n "raftadmin"
+
+# Create new window for control plane nodes (3 panes)
+tmux new-window -n "Nadzorni strežniki"
 
 # Split window for control plane nodes (3 panes)
+tmux select-window -t "Nadzorni strežniki"
 tmux split-window -h
 tmux split-window -h
 tmux select-layout even-horizontal
@@ -64,8 +71,8 @@ echo "Zagnani nadzorni strežniki"
 # Wait for bootstrap node to start
 sleep 5
 
-# Create new window for raft admin commands
-tmux new-window -n "raftadmin"
+# Set up raftadmin commands in the first window
+tmux select-window -t "raftadmin"
 tmux send-keys "sleep 3 && raftadmin 127.0.0.1:6000 add_voter node2 127.0.0.1:6001 0" C-m
 tmux send-keys "sleep 1 && raftadmin 127.0.0.1:6000 add_voter node3 127.0.0.1:6002 0" C-m
 
@@ -76,6 +83,7 @@ sleep 5
 
 # Create new window for data plane servers (3 panes)
 tmux new-window -n "Podatkovni strežniki"
+tmux select-window -t "Podatkovni strežniki"
 tmux split-window -h
 tmux split-window -h
 tmux select-layout even-horizontal
@@ -94,8 +102,9 @@ echo "Zagnani podatkovni strežniki"
 # Wait for servers to start
 sleep 5
 
-# Create new window for seeding data
-tmux new-window -n "Odjemalec"
+# Create window for client 1 and seed data
+tmux new-window -n "client 1"
+tmux select-window -t "client 1"
 tmux send-keys "./out/client --entry 127.0.0.1:6000 create-user 'Janez'" C-m
 tmux send-keys "./out/client --entry 127.0.0.1:6000 create-user 'Ana'" C-m
 tmux send-keys "./out/client --entry 127.0.0.1:6000 create-user 'Franci'" C-m
@@ -109,11 +118,16 @@ tmux send-keys "./out/client --entry 127.0.0.1:6000 post-message --topic-id=1 --
 tmux send-keys "./out/client --entry 127.0.0.1:6000 post-message --topic-id=2 --user-id=2 'Jutri letim z Airbusom'" C-m
 tmux send-keys "./out/client -e 127.0.0.1:6000 -t"
 
+# Create second client tab
+tmux new-window -n "client 2"
+tmux select-window -t "client 2"
+tmux send-keys "./out/client -e 127.0.0.1:6000 -t"
+
 echo "Zaključen seed"
 
 sleep 5
 
-# Select the cluster window to start
+# Za začetek
 tmux select-window -t "Nadzorni strežniki"
 
 # Attach to session

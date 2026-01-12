@@ -9,6 +9,13 @@ import (
 
 	"context"
 	rpb "control/razpravljalnica"
+	"io"
+	"log"
+	"net"
+	"os"
+	"path/filepath"
+	"strconv"
+
 	"github.com/Jille/raft-grpc-leader-rpc/leaderhealth"
 	"github.com/Jille/raft-grpc-leader-rpc/rafterrors"
 	transport "github.com/Jille/raft-grpc-transport"
@@ -21,12 +28,6 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	status "google.golang.org/grpc/status"
 	emptypb "google.golang.org/protobuf/types/known/emptypb"
-	"io"
-	"log"
-	"net"
-	"os"
-	"path/filepath"
-	"strconv"
 )
 
 var cli RunControlCmd
@@ -97,7 +98,7 @@ func (s *RunControlCmd) Run() error {
 	if s.Tui {
 		go func() {
 			if err := srv.Serve(lis); err != nil {
-				log.Printf("failed to serve: %v", err)
+				TuiLog("failed to serve: %v", err)
 			}
 		}()
 		RunTUI()
@@ -132,7 +133,11 @@ func NewRaft(ctx context.Context, myID, myAddress string, fsm raft.FSM) (*raft.R
 		return nil, nil, fmt.Errorf(`boltdb.NewBoltStore(%q): %v`, filepath.Join(baseDir, "stable.dat"), err)
 	}
 
-	fss, err := raft.NewFileSnapshotStore(baseDir, 3, os.Stderr)
+	var logOutput io.Writer = os.Stderr
+	if cli.Tui {
+		logOutput = io.Discard
+	}
+	fss, err := raft.NewFileSnapshotStore(baseDir, 3, logOutput)
 	if err != nil {
 		return nil, nil, fmt.Errorf(`raft.NewFileSnapshotStore(%q, ...): %v`, baseDir, err)
 	}

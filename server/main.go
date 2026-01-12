@@ -47,7 +47,9 @@ var cntrlldp = ControlledPlaneServer{
 func myLog(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
 	resp, err = handler(ctx, req)
 	msg := fmt.Sprintf("%v(%+v) -> %+v %v", info.FullMethod, req, resp, err)
-	log.Print(msg)
+	if !cli.Tui {
+		log.Print(msg)
+	}
 	TuiLog(msg)
 	return resp, err
 }

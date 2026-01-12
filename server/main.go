@@ -46,7 +46,9 @@ var cntrlldp = ControlledPlaneServer{
 
 func myLog(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
 	resp, err = handler(ctx, req)
-	log.Printf("%v(%+v) -> %+v %v", info.FullMethod, req, resp, err)
+	msg := fmt.Sprintf("%v(%+v) -> %+v %v", info.FullMethod, req, resp, err)
+	log.Print(msg)
+	TuiLog(msg)
 	return resp, err
 }
 
@@ -612,7 +614,7 @@ func (s *MessageBoardServer) PostMessage(ctx context.Context, req *rpb.PostMessa
 
 	s.message_idx++
 	topic.messages[id] = msg
-	return &rpb.Message{Id: id, UserId: msg.user, Text: msg.text, CreatedAt: msg.created, Likes: int32(len(msg.likes))}, nil
+	return &rpb.Message{Id: id, TopicId: topic_id, UserId: msg.user, Text: msg.text, CreatedAt: msg.created, Likes: int32(len(msg.likes))}, nil
 }
 func fwPostMessage(ctx context.Context, req *rpb.PostMessageRequest) (*rpb.Message, error) {
 	cntrlldp.mtx.RLock()

@@ -218,6 +218,10 @@ raftadmin 127.0.0.1:6000 add_voter node3 127.0.0.1:6002 0
 
 > preko tui:
 
+```bash
+./out/client -e 127.0.0.1:6000 -t
+```
+
 ### Pisanje sporočil
 
 ### Ustvarjanje tem

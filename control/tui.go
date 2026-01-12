@@ -24,11 +24,24 @@ type TUI struct {
 	logs []string
 }
 
+// logging v TUI
+var tuiInstance *TUI
+
+func TuiLog(format string, args ...any) {
+	if tuiInstance != nil && tuiInstance.logsView != nil && tuiInstance.app != nil {
+		msg := fmt.Sprintf(format, args...)
+		tuiInstance.app.QueueUpdateDraw(func() {
+			tuiInstance.addLog(msg)
+		})
+	}
+}
+
 func RunTUI() {
 	tui := &TUI{
 		app:  tview.NewApplication(),
 		logs: make([]string, 0),
 	}
+	tuiInstance = tui
 
 	tui.app.EnableMouse(true)
 
@@ -64,7 +77,7 @@ func (t *TUI) setupUI() {
 func (t *TUI) showMainScreen() {
 	// Nodes tabela
 	t.nodesTable = tview.NewTable().
-		SetBorders(true).
+		SetBorders(false).
 		SetSelectable(true, false)
 	t.nodesTable.SetBorder(true).SetTitle(" Data Plane Nodes (Chain) ")
 	t.nodesTable.SetBackgroundColor(tcell.ColorBlack)
@@ -81,7 +94,8 @@ func (t *TUI) showMainScreen() {
 	t.logsView = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
-		SetWordWrap(true)
+		SetWordWrap(true).
+		SetMaxLines(100)
 	t.logsView.SetBorder(true).SetTitle(" Logs ")
 	t.logsView.SetBackgroundColor(tcell.ColorBlack)
 
@@ -144,7 +158,9 @@ func (t *TUI) setFocusPanel(p tview.Primitive) {
 
 	if box, ok := p.(interface{ SetBorderColor(tcell.Color) *tview.Box }); ok {
 		box.SetBorderColor(tcell.ColorWhite)
-		if attrBox, ok := p.(interface{ SetBorderAttributes(tcell.AttrMask) *tview.Box }); ok {
+		if attrBox, ok := p.(interface {
+			SetBorderAttributes(tcell.AttrMask) *tview.Box
+		}); ok {
 			attrBox.SetBorderAttributes(tcell.AttrBold)
 		}
 	}
@@ -179,10 +195,11 @@ func (t *TUI) updateNodesTable() {
 	t.nodesTable.Clear()
 
 	// Header
-	t.nodesTable.SetCell(0, 0, tview.NewTableCell("[yellow]Position[white]").SetSelectable(false))
-	t.nodesTable.SetCell(0, 1, tview.NewTableCell("[yellow]Node ID[white]").SetSelectable(false))
-	t.nodesTable.SetCell(0, 2, tview.NewTableCell("[yellow]Address[white]").SetSelectable(false))
-	t.nodesTable.SetCell(0, 3, tview.NewTableCell("[yellow]Role[white]").SetSelectable(false))
+	t.nodesTable.SetCell(0, 0, tview.NewTableCell("[yellow]Position[white]").SetSelectable(false).SetExpansion(1))
+	t.nodesTable.SetCell(0, 1, tview.NewTableCell("[yellow]Node ID[white]").SetSelectable(false).SetExpansion(1))
+	t.nodesTable.SetCell(0, 2, tview.NewTableCell("[yellow]Address[white]").SetSelectable(false).SetExpansion(2))
+	t.nodesTable.SetCell(0, 3, tview.NewTableCell("[yellow]Role[white]").SetSelectable(false).SetExpansion(1))
+	t.nodesTable.SetFixed(1, 0)
 
 	cntsrv.mtx.RLock()
 	defer cntsrv.mtx.RUnlock()
@@ -197,10 +214,10 @@ func (t *TUI) updateNodesTable() {
 			role = "[blue]TAIL[white]"
 		}
 
-		t.nodesTable.SetCellSimple(i+1, 0, strconv.Itoa(i))
-		t.nodesTable.SetCellSimple(i+1, 1, strconv.FormatInt(node.id, 10))
-		t.nodesTable.SetCellSimple(i+1, 2, node.address)
-		t.nodesTable.SetCell(i+1, 3, tview.NewTableCell(role))
+		t.nodesTable.SetCell(i+1, 0, tview.NewTableCell(strconv.Itoa(i)).SetExpansion(1))
+		t.nodesTable.SetCell(i+1, 1, tview.NewTableCell(strconv.FormatInt(node.id, 10)).SetExpansion(1))
+		t.nodesTable.SetCell(i+1, 2, tview.NewTableCell(node.address).SetExpansion(2))
+		t.nodesTable.SetCell(i+1, 3, tview.NewTableCell(role).SetExpansion(1))
 	}
 }
 
@@ -252,15 +269,8 @@ func (t *TUI) updateRaftInfo() {
 
 func (t *TUI) addLog(msg string) {
 	timestamp := time.Now().Format("15:04:05")
-	logEntry := fmt.Sprintf("[dim]%s[white] %s", timestamp, msg)
-	t.logs = append(t.logs, logEntry)
-
-	// Ohrani samo zadnjih 100 logov
-	if len(t.logs) > 100 {
-		t.logs = t.logs[len(t.logs)-100:]
-	}
-
-	t.logsView.SetText(strings.Join(t.logs, "\n"))
+	logEntry := fmt.Sprintf("[dim]%s[white] %s\n", timestamp, msg)
+	fmt.Fprint(t.logsView, logEntry)
 	t.logsView.ScrollToEnd()
 }
 

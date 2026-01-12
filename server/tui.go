@@ -24,11 +24,25 @@ type TUI struct {
 	logs []string
 }
 
+// logging v TUI
+var tuiInstance *TUI
+
+func TuiLog(format string, args ...any) {
+	if tuiInstance != nil && tuiInstance.logsView != nil && tuiInstance.app != nil {
+		msg := fmt.Sprintf(format, args...)
+		tuiInstance.app.QueueUpdateDraw(func() {
+			tuiInstance.addLog(msg)
+		})
+	}
+}
+
 func RunTUI() {
 	tui := &TUI{
 		app:  tview.NewApplication(),
 		logs: make([]string, 0),
 	}
+
+	tuiInstance = tui
 
 	tui.app.EnableMouse(true)
 
@@ -82,7 +96,7 @@ func (t *TUI) setupUI() {
 func (t *TUI) showMainScreen() {
 	// Users tabela
 	t.usersTable = tview.NewTable().
-		SetBorders(true).
+		SetBorders(false).
 		SetSelectable(true, false)
 	t.usersTable.SetBorder(true).SetTitle(" Users ")
 	t.usersTable.SetBackgroundColor(tcell.ColorBlack)
@@ -90,7 +104,7 @@ func (t *TUI) showMainScreen() {
 
 	// Topics tabela
 	t.topicsTable = tview.NewTable().
-		SetBorders(true).
+		SetBorders(false).
 		SetSelectable(true, false)
 	t.topicsTable.SetBorder(true).SetTitle(" Topics ")
 	t.topicsTable.SetBackgroundColor(tcell.ColorBlack)
@@ -107,7 +121,8 @@ func (t *TUI) showMainScreen() {
 	t.logsView = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
-		SetWordWrap(true)
+		SetWordWrap(true).
+		SetMaxLines(100)
 	t.logsView.SetBorder(true).SetTitle(" Logs ")
 	t.logsView.SetBackgroundColor(tcell.ColorBlack)
 
@@ -225,15 +240,18 @@ func (t *TUI) updateUsersTable() {
 	t.usersTable.Clear()
 
 	// Header
-	t.usersTable.SetCell(0, 0, tview.NewTableCell("[yellow]ID[white]").SetSelectable(false))
-	t.usersTable.SetCell(0, 1, tview.NewTableCell("[yellow]Name[white]").SetSelectable(false))
+	t.usersTable.SetCell(0, 0, tview.NewTableCell("[yellow]ID[white]").SetSelectable(false).SetExpansion(1))
+	t.usersTable.SetCell(0, 1, tview.NewTableCell("[yellow]Name[white]").SetSelectable(false).SetExpansion(2))
+	t.usersTable.SetFixed(1, 0)
 
 	msrv.users_mtx.RLock()
 	defer msrv.users_mtx.RUnlock()
 
+	row := 1
 	for id, user := range msrv.users {
-		t.usersTable.SetCellSimple(id+1, 0, strconv.Itoa(id))
-		t.usersTable.SetCellSimple(id+1, 1, user.name)
+		t.usersTable.SetCell(row, 0, tview.NewTableCell(strconv.Itoa(id)).SetExpansion(1))
+		t.usersTable.SetCell(row, 1, tview.NewTableCell(user.name).SetExpansion(2))
+		row++
 	}
 }
 
@@ -241,17 +259,20 @@ func (t *TUI) updateTopicsTable() {
 	t.topicsTable.Clear()
 
 	// Header
-	t.topicsTable.SetCell(0, 0, tview.NewTableCell("[yellow]ID[white]").SetSelectable(false))
-	t.topicsTable.SetCell(0, 1, tview.NewTableCell("[yellow]Name[white]").SetSelectable(false))
-	t.topicsTable.SetCell(0, 2, tview.NewTableCell("[yellow]Messages[white]").SetSelectable(false))
+	t.topicsTable.SetCell(0, 0, tview.NewTableCell("[yellow]ID[white]").SetSelectable(false).SetExpansion(1))
+	t.topicsTable.SetCell(0, 1, tview.NewTableCell("[yellow]Name[white]").SetSelectable(false).SetExpansion(2))
+	t.topicsTable.SetCell(0, 2, tview.NewTableCell("[yellow]Messages[white]").SetSelectable(false).SetExpansion(1))
+	t.topicsTable.SetFixed(1, 0)
 
 	msrv.topics_mtx.RLock()
 	defer msrv.topics_mtx.RUnlock()
 
+	row := 1
 	for id, topic := range msrv.topics {
-		t.topicsTable.SetCellSimple(id+1, 0, strconv.Itoa(id))
-		t.topicsTable.SetCellSimple(id+1, 1, topic.name)
-		t.topicsTable.SetCellSimple(id+1, 2, strconv.Itoa(len(topic.messages)))
+		t.topicsTable.SetCell(row, 0, tview.NewTableCell(strconv.Itoa(id)).SetExpansion(1))
+		t.topicsTable.SetCell(row, 1, tview.NewTableCell(topic.name).SetExpansion(2))
+		t.topicsTable.SetCell(row, 2, tview.NewTableCell(strconv.Itoa(len(topic.messages))).SetExpansion(1))
+		row++
 	}
 }
 
@@ -294,15 +315,8 @@ func (t *TUI) updateChainInfo() {
 
 func (t *TUI) addLog(msg string) {
 	timestamp := time.Now().Format("15:04:05")
-	logEntry := fmt.Sprintf("[dim]%s[white] %s", timestamp, msg)
-	t.logs = append(t.logs, logEntry)
-
-	// Ohrani samo zadnjih 100 logov
-	if len(t.logs) > 100 {
-		t.logs = t.logs[len(t.logs)-100:]
-	}
-
-	t.logsView.SetText(strings.Join(t.logs, "\n"))
+	logEntry := fmt.Sprintf("[dim]%s[white] %s\n", timestamp, msg)
+	fmt.Fprint(t.logsView, logEntry)
 	t.logsView.ScrollToEnd()
 }
 

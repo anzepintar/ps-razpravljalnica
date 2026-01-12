@@ -777,7 +777,7 @@ func (t *TUI) showNewTopicDialog() {
 	form.SetBackgroundColor(tcell.ColorBlack)
 	var topicName string
 
-	form.AddInputField("Topic Name", "", 40, nil, func(text string) {
+	form.AddInputField("Topic Name", "", 25, nil, func(text string) {
 		topicName = text
 	})
 	form.AddButton("Create", func() {
@@ -1291,7 +1291,7 @@ func (t *TUI) handleSubscriptionStream(ctx context.Context, stream grpc.ServerSt
 			if subIndex < 0 {
 				fmt.Fprintf(t.logView, "[dim]%s[white] [cyan]Event:[white] %s on msg #%d\n", timestamp, opName, event.Message.Id)
 			} else {
-				fmt.Fprintf(t.logView, "[dim]%s[white] [cyan]Sub Event:[white] %s on msg #%d (topic %d)\n",
+				fmt.Fprintf(t.logView, "[dim]%s[white] [cyan]Sub Event:[white] %s on msg #%d (topic %v)\n",
 					timestamp, opName, event.Message.Id, event.Message.TopicId)
 			}
 			t.logView.ScrollToEnd()
@@ -1302,11 +1302,11 @@ func (t *TUI) handleSubscriptionStream(ctx context.Context, stream grpc.ServerSt
 // showNewSubscriptionDialog prikaže dialog za ustvarjanje nove naročnine
 func (t *TUI) showNewSubscriptionDialog() {
 	form := tview.NewForm()
-	form.SetBackgroundColor(tcell.ColorDarkBlue)
+	form.SetBackgroundColor(tcell.ColorBlack)
 
 	var topicIDsInput string
 
-	form.AddInputField("Topic IDs (comma separated):", "", 40, nil, func(text string) {
+	form.AddInputField("Topic IDs (comma separated):", "", 20, nil, func(text string) {
 		topicIDsInput = text
 	})
 

@@ -111,8 +111,6 @@ Argumenti:
 # Z drugačnim entry pointom
 ./out/client --entry 127.0.0.1:6000 create-user "Janez"
 ```
-
-
 ## Delovanje
 
 - **Writes** (CreateUser, CreateTopic, PostMessage, ...) → HEAD
@@ -120,7 +118,12 @@ Argumenti:
 - Če karkoli faila → client snitcha kontrolni ravnini
 - **Subscriptions** -> 50% možnosti entry point, 50% da naprej, če pride to repa vzame rep.
 
-## TMUX simulacija
+
+---
+
+## Primer uporabe:
+
+## Uporaba TMUX-a
 
 ```bash
 ./runall.sh
@@ -140,7 +143,6 @@ tmux kill-server
 
 
 
-## Primeri uporabe:
 
 
 ### Build
@@ -180,11 +182,11 @@ go test -fuzz=FuzzValidateNodeAddress -fuzztime=30s ./control
 ```bash
 # bootstrap node
 rm runtime -r
-./out/control 127.0.0.1:6000 node1 --bootstrap-raft
+./out/control 127.0.0.1:6000 node1 --bootstrap-raft -t
 
 ./out/control 127.0.0.1:6001 node2 -t
 
-./out/control 127.0.0.1:6002 node3
+./out/control 127.0.0.1:6002 node3 -t
 
 go install github.com/Jille/raftadmin/cmd/raftadmin@latest
 
@@ -198,11 +200,11 @@ raftadmin 127.0.0.1:6000 add_voter node3 127.0.0.1:6002 0
 > vsak v svojem terminalu (split)
 
 ```bash
-./out/server 127.0.0.1:6000 -b 127.0.0.1:5000
+./out/server 127.0.0.1:6000 -b 127.0.0.1:5000 -t
 
 ./out/server 127.0.0.1:6000 -b 127.0.0.1:5001 -t
 
-./out/server 127.0.0.1:6000 -b 127.0.0.1:5002
+./out/server 127.0.0.1:6000 -b 127.0.0.1:5002 -t
 ```
 
 ### Seed
@@ -219,43 +221,79 @@ raftadmin 127.0.0.1:6000 add_voter node3 127.0.0.1:6002 0
 ./out/client --entry 127.0.0.1:6000 post-message --topic-id=0 --user-id=2 "Dizel manj kot 100000 km"
 ./out/client --entry 127.0.0.1:6000 post-message --topic-id=0 --user-id=2 "Katero kolo priporočate?"
 ./out/client --entry 127.0.0.1:6000 post-message --topic-id=0 --user-id=2 "Gorskega"
+./out/client --entry 127.0.0.1:6000 post-message --topic-id=2 --user-id=2 "Včeraj sem letel iz Ljubljane v Madrid in to z ta velikim Airbusom!"
+./out/client --entry 127.0.0.1:6000 post-message --topic-id=2 --user-id=0 "Kako je bilo?"
 ```
 
-> preko tui:
+
+### Client CLI - primer seed zgoraj
+
+### Client TUI
 
 ```bash
 ./out/client -e 127.0.0.1:6000 -t
 ```
+- Pisanje sporočil
 
-### Pisanje sporočil
+- Ustvarjanje tem
 
-### Ustvarjanje tem
+- Všečkanje sporočil
 
-### Všečkanje sporočil
+- Izbris svojega sporočila
 
-### Dodajanje naročnin 
+- Dodajanje naročnin 
 
-### Pogled na strežnike
+- Pogled na strežnike
 
 
 
 ### Redundanca podatkovne ravnine
 
-#### Padec head
+- Padec head
 
-#### Padec tail
+- Padec tail
 
-#### Padec vmesnega vozlišča
+- Padec vmesnega vozlišča
 
-#### Dodajanje novega vozlišča
+- Dodajanje novega vozlišča
+
+```bash
+./out/server 127.0.0.1:6000 -b 127.0.0.1:5003 -t
+```
 
 
 ### Redundanca nadzorne ravnine
 
-#### Padec leaderja
+- Padec leaderja
 
-#### Dodajanje vozlišča
+- Ponovni zagon (bivšega) leaderja
 
+- Dodajanje vozlišča
+
+```bash
+./out/control 127.0.0.1:6003 node4
+# počakaj nekaj trenutkov
+raftadmin 127.0.0.1:6000 add_voter node4 127.0.0.1:6003 0
+# počakaj nekaj trenutkov
+```
+
+### Testiranje metod
+
+```bash
+# Vsi unit testi v projektu
+cd client && go test -v && cd ..
+cd server && go test -v && cd ..
+cd control && go test -v && cd ..
+
+# Fuzz testi za client
+go test -fuzz=FuzzParseTopicIDs -fuzztime=30s ./client
+
+# Fuzz testi za server
+go test -fuzz=FuzzValidateUserName -fuzztime=30s ./server
+
+# Fuzz testi za control
+go test -fuzz=FuzzValidateNodeAddress -fuzztime=30s ./control
+```
 
 
 TODO:
@@ -263,4 +301,3 @@ TODO:
     - izpadi strežnikov control - entry, non entry
     - izpadi strežnikov data - head, tail, subscription
     - dodajanje strežnikov in povezovanje na njih (če obdržijo vse podatke)
-- odpravi shiftanje

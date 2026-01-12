@@ -54,7 +54,7 @@ tmux new-window -n "Nadzorni strežniki"
 tmux select-window -t "Nadzorni strežniki"
 tmux split-window -h
 tmux split-window -h
-tmux select-layout even-horizontal
+# tmux select-layout even-horizontal
 
 # Start control plane nodes
 tmux select-pane -t 0
@@ -102,9 +102,13 @@ echo "Zagnani podatkovni strežniki"
 # Wait for servers to start
 sleep 5
 
-# Create window for client 1 and seed data
-tmux new-window -n "client 1"
-tmux select-window -t "client 1"
+# Create window for clients, split 50-50
+tmux new-window -n "clients"
+tmux select-window -t "clients"
+tmux split-window -h
+
+# Client 1 pane (left) with seed data
+tmux select-pane -t 0
 tmux send-keys "./out/client --entry 127.0.0.1:6000 create-user 'Janez'" C-m
 tmux send-keys "./out/client --entry 127.0.0.1:6000 create-user 'Ana'" C-m
 tmux send-keys "./out/client --entry 127.0.0.1:6000 create-user 'Franci'" C-m
@@ -116,16 +120,22 @@ tmux send-keys "./out/client --entry 127.0.0.1:6000 post-message --topic-id=0 --
 tmux send-keys "./out/client --entry 127.0.0.1:6000 post-message --topic-id=1 --user-id=1 'Katero kolo priporočate?'" C-m
 tmux send-keys "./out/client --entry 127.0.0.1:6000 post-message --topic-id=1 --user-id=2 'Gorskega'" C-m
 tmux send-keys "./out/client --entry 127.0.0.1:6000 post-message --topic-id=2 --user-id=2 'Jutri letim z Airbusom'" C-m
+tmux send-keys "./out/client --entry 127.0.0.1:6000 post-message --topic-id=2 --user-id=2 'Včeraj sem letel iz Ljubljane v Madrid in to z ta velikim Airbusom!'" C-m
+tmux send-keys "./out/client --entry 127.0.0.1:6000 post-message --topic-id=2 --user-id=0 'Kako je bilo?'" C-m
 tmux send-keys "./out/client -e 127.0.0.1:6000 -t"
 
-# Create second client tab
-tmux new-window -n "client 2"
-tmux select-window -t "client 2"
+# Client 2 pane (right)
+tmux select-pane -t 1
 tmux send-keys "./out/client -e 127.0.0.1:6000 -t"
 
 echo "Zaključen seed"
 
-sleep 5
+# Create readme window
+tmux new-window -n "readme.md"
+tmux select-window -t "readme.md"
+tmux send-keys "cat README.md" C-m
+
+sleep 2
 
 # Za začetek
 tmux select-window -t "Nadzorni strežniki"

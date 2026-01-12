@@ -120,7 +120,23 @@ Argumenti:
 - Če karkoli faila → client snitcha kontrolni ravnini
 - **Subscriptions** -> 50% možnosti entry point, 50% da naprej, če pride to repa vzame rep.
 
+## TMUX simulacija
 
+```bash
+./runall.sh
+
+# Ctrl+b n - Next window
+# Ctrl+b p - Previous window
+# Ctrl+b [0-4] - Jump to window number
+# Ctrl+b arrow - Move between panes
+# Ctrl+b d - Detach (script keeps running)
+# Ctrl+b w - Window list (interactive selection)
+# tmux attach -t ps-razpravljalnica - Re-attach
+# tmux kill-server
+
+# po koncu
+tmux kill-server
+```
 
 
 

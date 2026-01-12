@@ -114,7 +114,7 @@ echo "Zaključen seed"
 sleep 5
 
 # Select the cluster window to start
-tmux select-window -t "Podatkovni strežniki"
+tmux select-window -t "Nadzorni strežniki"
 
 # Attach to session
 tmux attach-session -t $SESSION

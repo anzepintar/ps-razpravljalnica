@@ -1,4 +1,4 @@
-# Razpravljalnica
+# Razpravljalnica - projektna naloga pri predmetu Porazdeljeni sistemi 2025/2026
 
 ## Generiranje proto
 
